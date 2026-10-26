@@ -467,6 +467,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             trash = state.trash_summary(library.name)
             pending = pending_plans(config, library.name)
             runs = state.recent_runs(limit=1, library=library.name)
+            active = state.active_run_progress(library.name)
             libraries.append(
                 {
                     "name": library.name,
@@ -482,6 +483,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "trash_entries": trash["entries"],
                     "trash_size": trash["size"],
                     "recent_run": runs[0] if runs else None,
+                    "active": active,
                 }
             )
     if args.json:
@@ -504,7 +506,19 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"trash: {item['trash_entries']} entries, "
             f"{human_size(item['trash_size'])}"
         )
-        if item["recent_run"]:
+        if item.get("active"):
+            a = item["active"]
+            ft = int(a.get("files_total") or 0)
+            fd = int(a.get("files_done") or 0)
+            bt = int(a.get("bytes_total") or 0)
+            bd = int(a.get("bytes_done") or 0)
+            pct = f"{int((fd/ft)*100)}%" if ft else "-"
+            print(
+                f"  APPLYING: {a['id']} plan={a.get('plan_id')} "
+                f"files {fd}/{ft} ({pct}) {human_size(bd)}/{human_size(bt)} "
+                f"{a.get('current') or ''}"
+            )
+        elif item["recent_run"]:
             run = item["recent_run"]
             print(
                 f"  recent run: {run['id']} {run['status']} "

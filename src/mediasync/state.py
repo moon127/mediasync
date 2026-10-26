@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS runs (
     finished TEXT,
     status TEXT NOT NULL,
     plan_id TEXT,
-    summary TEXT
+    summary TEXT,
+    files_total INTEGER NOT NULL DEFAULT 0,
+    files_done INTEGER NOT NULL DEFAULT 0,
+    bytes_total INTEGER NOT NULL DEFAULT 0,
+    bytes_done INTEGER NOT NULL DEFAULT 0,
+    current TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit (
@@ -100,6 +105,20 @@ class State:
                 self.conn.execute(
                     f"ALTER TABLE title_cache ADD COLUMN {name} {declaration}"
                 )
+        run_columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(runs)")
+        }
+        for name, declaration in (
+            ("files_total", "INTEGER NOT NULL DEFAULT 0"),
+            ("files_done", "INTEGER NOT NULL DEFAULT 0"),
+            ("bytes_total", "INTEGER NOT NULL DEFAULT 0"),
+            ("bytes_done", "INTEGER NOT NULL DEFAULT 0"),
+            ("current", "TEXT"),
+        ):
+            if name not in run_columns:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {declaration}")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -162,8 +181,8 @@ class State:
 
     def start_run(self, run_id: str, library: str, mode: str, plan_id: str | None) -> None:
         self.conn.execute(
-            "INSERT INTO runs(id, library, mode, started, status, plan_id) "
-            "VALUES (?, ?, ?, ?, 'running', ?)",
+            "INSERT INTO runs(id, library, mode, started, status, plan_id, files_total, files_done, bytes_total, bytes_done) "
+            "VALUES (?, ?, ?, ?, 'running', ?, 0, 0, 0, 0)",
             (run_id, library, mode, now_iso(), plan_id),
         )
         self.conn.commit()
@@ -332,3 +351,71 @@ class State:
             params.append(library)
         row = self.conn.execute(query, params).fetchone()
         return {"entries": int(row["entries"]), "size": int(row["size"])}
+
+
+    def update_run_progress(
+        self,
+        run_id: str,
+        *,
+        library: str = "",
+        plan_id: str = "",
+        files_total: int = 0,
+        files_done: int = 0,
+        bytes_total: int = 0,
+        bytes_done: int = 0,
+        current: str = "",
+        status: str = "running",
+        mode: str = "apply",
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO runs(id, library, mode, started, finished, status, plan_id, summary, files_total, files_done, bytes_total, bytes_done, current)
+            VALUES(?, ?, ?, datetime('now'), NULL, ?, ?, '', ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                status=excluded.status,
+                files_total=excluded.files_total,
+                files_done=excluded.files_done,
+                bytes_total=excluded.bytes_total,
+                bytes_done=excluded.bytes_done,
+                current=excluded.current,
+                plan_id=COALESCE(NULLIF(excluded.plan_id,''), runs.plan_id)
+            """,
+            (
+                run_id,
+                library,
+                mode,
+                status,
+                plan_id,
+                files_total,
+                files_done,
+                bytes_total,
+                bytes_done,
+                current,
+            ),
+        )
+        self.conn.commit()
+
+    def get_run_progress(self, run_id: str) -> dict[str, Any] | None:
+        cur = self.conn.execute(
+            "SELECT id, library, mode, started, finished, status, plan_id, summary, files_total, files_done, bytes_total, bytes_done, current FROM runs WHERE id=?",
+            (run_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    def active_run_progress(self, library: str | None = None) -> dict[str, Any] | None:
+        if library:
+            cur = self.conn.execute(
+                "SELECT id, library, mode, started, finished, status, plan_id, summary, files_total, files_done, bytes_total, bytes_done, current FROM runs WHERE library=? AND finished IS NULL AND status IN ('running','apply','run') ORDER BY started DESC LIMIT 1",
+                (library,),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT id, library, mode, started, finished, status, plan_id, summary, files_total, files_done, bytes_total, bytes_done, current FROM runs WHERE finished IS NULL AND status IN ('running','apply','run') ORDER BY started DESC LIMIT 1",
+            )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return dict(row)

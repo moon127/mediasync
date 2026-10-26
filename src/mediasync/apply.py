@@ -13,6 +13,7 @@ from .state import State
 from .trash import quarantine, trash_root
 from .util import (
     directory_fingerprint,
+    human_size,
     ensure_dir,
     list_visible_titles,
     now_iso,
@@ -182,6 +183,31 @@ def apply_plan(
 
     accepted = [c for c in plan.changes if c.decision == Decision.ACCEPTED.value]
     result = ApplyResult(plan_id=plan.plan_id, library=library.name, run_id=run_id)
+    files_total = 0
+    bytes_total = 0
+    for c in accepted:
+        if c.action in {Action.ADD_TITLE.value, Action.DELETE_TITLE.value}:
+            files_total += 1
+            bytes_total += c.size or 0
+            continue
+        if c.action in {Action.ADD.value, Action.UPDATE.value, Action.REENCODE.value, Action.DELETE.value}:
+            files_total += 1
+            bytes_total += c.size or 0
+    try:
+        state.update_run_progress(
+            run_id,
+            library=library.name,
+            plan_id=plan.plan_id,
+            files_total=files_total,
+            files_done=0,
+            bytes_total=bytes_total,
+            bytes_done=0,
+            current="starting",
+            status="running",
+            mode="apply",
+        )
+    except Exception:
+        pass
     if not accepted:
         if pending:
             result.status = "approval_required"
@@ -191,6 +217,21 @@ def apply_plan(
             plan.status = "applied"
             plan.applied_at = now_iso()
         _save_plan(config, plan)
+        try:
+            state.update_run_progress(
+                run_id,
+                library=library.name,
+                plan_id=plan.plan_id,
+                files_total=files_total,
+                files_done=0,
+                bytes_total=bytes_total,
+                bytes_done=0,
+                current="done",
+                status=result.status,
+                mode="apply",
+            )
+        except Exception:
+            pass
         return result
 
     options = config.rsync_for(library)
@@ -202,7 +243,9 @@ def apply_plan(
     for change in accepted:
         by_title.setdefault(change.title, []).append(change)
 
-    report(f"{library.name}: applying {len(accepted)} accepted change(s)")
+    report(f"{library.name}: applying {len(accepted)} accepted change(s) ({files_total} items, {human_size(bytes_total)})")
+    files_done = 0
+    bytes_done = 0
     for title, title_changes in sorted(by_title.items()):
         source_title = os.path.join(source_root, title)
         target_title = os.path.join(target_root, title)
@@ -234,8 +277,31 @@ def apply_plan(
             and change.action in {Action.DELETE.value, Action.DELETE_TITLE.value}
         )
         _refresh_title_cache(config, state, library, plan, title, title_changes)
+        for c in title_changes:
+            if c.applied:
+                files_done += 1
+                bytes_done += c.size or 0
+        pct = int((files_done / files_total) * 100) if files_total else 100
+        try:
+            state.update_run_progress(
+                run_id,
+                library=library.name,
+                plan_id=plan.plan_id,
+                files_total=files_total,
+                files_done=files_done,
+                bytes_total=bytes_total,
+                bytes_done=bytes_done,
+                current=f"{title}: {files_done}/{files_total} ({pct}%) {human_size(bytes_done)}/{human_size(bytes_total)}",
+                status="running",
+                mode="apply",
+            )
+        except Exception:
+            pass
         if applied_here:
-            report(f"{library.name}: applied {applied_here} change(s) in {title}")
+            report(
+                f"{library.name}: applied {applied_here} change(s) in {title} "
+                f"({files_done}/{files_total}, {pct}%, {human_size(bytes_done)}/{human_size(bytes_total)})"
+            )
         for error in title_errors:
             report(f"{library.name}: ERROR {error}")
 
@@ -257,6 +323,21 @@ def apply_plan(
     if result.applied:
         plan.applied_at = now_iso()
     _save_plan(config, plan)
+    try:
+        state.update_run_progress(
+            run_id,
+            library=library.name,
+            plan_id=plan.plan_id,
+            files_total=files_total,
+            files_done=files_done,
+            bytes_total=bytes_total,
+            bytes_done=bytes_done,
+            current="complete",
+            status=result.status,
+            mode="apply",
+        )
+    except Exception:
+        pass
     state.upsert_library(
         library.name,
         inspection.source,
