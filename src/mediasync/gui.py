@@ -646,22 +646,42 @@ class MediasyncGui:
                             progress=progress,
                         )
                     except BaseException as exc:
-                        state.finish_run(run_id, "error", {"error": str(exc)})
+                        try:
+                            state.finish_run(run_id, "error", {"error": str(exc)})
+                        except Exception:
+                            pass
                         raise
-                    state.finish_run(
-                        run_id,
-                        result.status,
-                        {
-                            "plan_id": plan.plan_id,
-                            "applied": result.applied,
-                            "errors": result.errors,
-                        },
-                    )
+                    try:
+                        state.finish_run(
+                            run_id,
+                            result.status,
+                            {
+                                "plan_id": plan.plan_id,
+                                "applied": result.applied,
+                                "errors": result.errors,
+                            },
+                        )
+                    except Exception:
+                        pass
                     if result.status == "applied":
-                        supersede_pending(self.config, library.name, plan.plan_id)
+                        try:
+                            supersede_pending(self.config, library.name, plan.plan_id)
+                        except Exception:
+                            pass
                     return result
 
         def done(result) -> None:
+            try:
+                if self.plan is not None:
+                    from .planner import find_plan
+
+                    try:
+                        fresh = find_plan(self.config, self.plan.plan_id)
+                        self.plan = fresh
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self._refresh_plan()
             message = (
                 f"Apply {result.status}: applied={result.applied}, "

@@ -320,8 +320,11 @@ def apply_plan(
     else:
         result.status = "applied"
     plan.status = result.status
-    if result.applied:
+    if result.applied and result.status in {"applied", "partial"}:
         plan.applied_at = now_iso()
+    elif result.status == "applied":
+        plan.applied_at = now_iso()
+    plan.recompute_status()
     _save_plan(config, plan)
     try:
         state.update_run_progress(

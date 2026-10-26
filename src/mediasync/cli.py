@@ -484,10 +484,19 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "trash_size": trash["size"],
                     "recent_run": runs[0] if runs else None,
                     "active": active,
+                    "pending_list": pending,
                 }
             )
     if args.json:
-        print(json.dumps({"libraries": libraries}, indent=2, default=str))
+        out = []
+        for item in libraries:
+            d = dict(item)
+            d["pending_plans_detail"] = [
+                {"plan_id": p.plan_id, "status": p.status, "changes": len(p.changes)}
+                for p in d.pop("pending_list", [])
+            ]
+            out.append(d)
+        print(json.dumps({"libraries": out}, indent=2, default=str))
         return EXIT_OK
     for item in libraries:
         print(f"{item['name']}")
@@ -501,6 +510,18 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"  last run: {item['last_run'] or '-'} "
             f"status={item['last_status'] or '-'}"
         )
+        if item.get("pending_list"):
+            for p in item["pending_list"][:3]:
+                pending_cnt = sum(
+                    1 for c in p.changes if c.decision == Decision.PENDING.value
+                )
+                acc = sum(
+                    1 for c in p.changes if c.decision == Decision.ACCEPTED.value
+                )
+                print(
+                    f"  PLAN {p.plan_id}: status={p.status} changes={len(p.changes)} "
+                    f"pending={pending_cnt} accepted={acc}"
+                )
         print(
             f"  pending plans: {item['pending_plans']}  "
             f"trash: {item['trash_entries']} entries, "

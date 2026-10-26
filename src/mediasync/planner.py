@@ -567,17 +567,23 @@ def pending_plans(config: Config, library: str | None = None) -> list[Plan]:
             continue
         if library and plan.library != library:
             continue
+        if plan.applied_at or plan.status in {"applied", "superseded"}:
+            continue
         if not plan.changes and not plan.errors:
             continue
         actionable = bool(plan.errors) or any(
             change.decision in {Decision.PENDING.value, Decision.ACCEPTED.value}
             for change in plan.changes
         )
-        if actionable and plan.status in {
+        if not actionable:
+            continue
+        if plan.status in {
             "ready",
             "approval_required",
             "blocked",
             "error",
+            "partial",
+            "failed",
         }:
             plans.append(plan)
     return plans
