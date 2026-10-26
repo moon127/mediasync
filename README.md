@@ -108,6 +108,7 @@ report_html = true
 [rsync]
 modify_window = 2
 fsync = true
+timeout = 600
 # extra_args = ["--bwlimit=50m"]
 
 [apply]
@@ -153,6 +154,7 @@ Important settings:
 | `scan_mode` | `fast` uses the cache; `deep` rescans every title. |
 | `modify_window` | rsync `--modify-window` seconds, default 2 for SMB. |
 | `fsync` | Pass `--fsync` to rsync only when applying, never when scanning. |
+| `timeout` | rsync/network timeout in seconds, default 600. Passed as `--timeout` to rsync and affects subprocess timeouts for scan/copy; increase for slow WAN/VPN links. |
 | `delete_mode` | `trash` (default) or `permanent`. |
 | `require_mount` | Refuse to run if source or target is the root filesystem. |
 | `max_source_title_drop_pct` | Abort if the source loses more titles than this. |
@@ -171,6 +173,11 @@ rsync -rlt --no-perms --no-owner --no-group --no-xattrs --no-acls
 `--fsync` is added only to apply commands. Junk files such as `.DS_Store`,
 `._*`, `@Recycle`, `#recycle`, `Thumbs.db`, `*.tmp` and partial downloads are
 excluded by default.
+
+`[rsync].timeout` sets the rsync `--timeout` (default 600s) and the subprocess
+timeout for scan/copy operations. Increase it for slow WAN/VPN links. For
+connection-specific timeouts you can pass `--contimeout` via `extra_args` (if
+allowed).
 
 `rsync.extra_args` is restricted to a small allowlist of long-form options:
 `--bwlimit`, `--compress`, `--compress-level`, `--compress-choice`,
