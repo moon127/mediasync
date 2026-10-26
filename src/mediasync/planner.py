@@ -63,6 +63,8 @@ class TitleContext:
     probe_timeout: int
     rsync_options: object
     policy: PolicySet
+    progress: Progress | None = None
+    library_name: str = ""
 
 
 def plan_library(
@@ -112,6 +114,8 @@ def plan_library(
             probe_timeout=options.timeout,
             rsync_options=options,
             policy=policy,
+            progress=progress,
+            library_name=library.name,
         )
         for title in all_titles
     ]
@@ -119,6 +123,7 @@ def plan_library(
     results: list[TitleWork] = []
     total = len(contexts)
     completed = 0
+    report(f"{library.name}: scanning {total} title(s)")
     with ThreadPoolExecutor(max_workers=config.concurrency) as executor:
         futures = {
             executor.submit(_process_title, context): context for context in contexts
@@ -207,6 +212,8 @@ def plan_library(
 
 
 def _process_title(context: TitleContext) -> TitleWork:
+    if context.progress and context.library_name:
+        context.progress(f"{context.library_name}: scanning {context.title}")
     source_mtime, source_count, source_digest = tree_fingerprint(
         context.source_title
     )
