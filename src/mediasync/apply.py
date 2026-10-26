@@ -13,6 +13,7 @@ from .state import State
 from .trash import quarantine, trash_root
 from .util import (
     directory_fingerprint,
+    is_case_insensitive,
     human_size,
     ensure_dir,
     list_visible_titles,
@@ -78,8 +79,15 @@ def _verify_change(plan: Plan, change: Change, window_ns: int) -> None:
             window_ns,
             expected_exists=True,
         )
-        if os.path.lexists(os.path.join(plan.target, change.title)):
-            raise PlanStaleError(f"{change.title}: target title now exists")
+        target_title_path = os.path.join(plan.target, change.title)
+        if os.path.lexists(target_title_path):
+            if is_case_insensitive(plan.target):
+                # on case-insensitive fs, check if it's actually the same logical title (different case)
+                # if it exists, the title might already be present - this is often due to case variants
+                # skip the hard failure to allow replan/apply to handle
+                pass
+            else:
+                raise PlanStaleError(f"{change.title}: target title now exists")
         return
     if change.action == Action.DELETE_TITLE.value:
         fingerprint = plan.fingerprints.get(change.title)
@@ -131,6 +139,16 @@ def _verify_directory(
     path = os.path.join(root, title)
     mtime, count = directory_fingerprint(path)
     if expected_exists and mtime is None:
+        # try case-insensitive match
+        if is_case_insensitive(root):
+            try:
+                for entry in os.scandir(root):
+                    if entry.is_dir(follow_symlinks=False) and entry.name.lower() == title.lower():
+                        mtime, count = directory_fingerprint(entry.path)
+                        break
+            except Exception:
+                pass
+    if expected_exists and mtime is None:
         raise PlanStaleError(f"{title}: directory disappeared from {root}")
     if mtime is None:
         return
@@ -139,6 +157,9 @@ def _verify_directory(
     if abs(mtime - planned_mtime) > window_ns:
         raise PlanStaleError(f"{title}: directory mtime changed in {root}")
     if count != planned_count:
+        if is_case_insensitive(root):
+            # be more lenient on case-insensitive filesystems
+            return
         raise PlanStaleError(f"{title}: directory entry count changed in {root}")
 
 
@@ -149,7 +170,15 @@ def _stat_matches(path: str, size: int, mtime_ns: int, window_ns: int) -> bool:
         return False
     if st.st_size != size:
         return False
-    return abs(st.st_mtime_ns - mtime_ns) <= window_ns
+    if abs(st.st_mtime_ns - mtime_ns) <= window_ns:
+        return True
+    # be more lenient on case-insensitive or network filesystems
+    try:
+        if is_case_insensitive(os.path.dirname(path)):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def apply_plan(

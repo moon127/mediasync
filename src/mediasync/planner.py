@@ -25,6 +25,7 @@ from .safety import check_source_sanity, inspect_library
 from .state import State
 from .util import (
     du_size,
+    is_case_insensitive,
     human_size,
     is_junk_name,
     now_iso,
@@ -98,27 +99,66 @@ def plan_library(
 
     source_set = set(inspection.source_titles)
     target_set = set(inspection.target_titles)
-    all_titles = sorted(source_set | target_set)
+    case_insensitive = is_case_insensitive(inspection.source) or is_case_insensitive(inspection.target)
+    if case_insensitive:
+        source_map = {t.lower(): t for t in source_set}
+        target_map = {t.lower(): t for t in target_set}
+        all_keys = sorted(set(source_map) | set(target_map))
+        all_titles = [source_map.get(k) or target_map.get(k) for k in all_keys]
+        source_keys = set(source_map.keys())
+        target_keys = set(target_map.keys())
+        def _in_src(key):
+            return key in source_keys
+        def _in_tgt(key):
+            return key in target_keys
+        def _src_title(key):
+            return source_map.get(key)
+        def _tgt_title(key):
+            return target_map.get(key)
+    else:
+        all_titles = sorted(source_set | target_set)
+        source_keys = source_set
+        target_keys = target_set
+        def _in_src(key):
+            return key in source_set
+        def _in_tgt(key):
+            return key in target_set
+        def _src_title(key):
+            return key
+        def _tgt_title(key):
+            return key
 
-    contexts = [
-        TitleContext(
-            title=title,
-            kind=library.kind,
-            source_title=os.path.join(inspection.source, title),
-            target_title=os.path.join(inspection.target, title),
-            in_source=title in source_set,
-            in_target=title in target_set,
-            cache=cache.get(title),
-            deep=deep,
-            probe=config.probe,
-            probe_timeout=options.timeout,
-            rsync_options=options,
-            policy=policy,
-            progress=progress,
-            library_name=library.name,
+    contexts = []
+    for title in all_titles:
+        if case_insensitive:
+            key = title.lower()
+            in_source = _in_src(key)
+            in_target = _in_tgt(key)
+            src_t = _src_title(key)
+            tgt_t = _tgt_title(key)
+        else:
+            in_source = title in source_set
+            in_target = title in target_set
+            src_t = title
+            tgt_t = title
+        contexts.append(
+            TitleContext(
+                title=title,
+                kind=library.kind,
+                source_title=os.path.join(inspection.source, src_t) if src_t else os.path.join(inspection.source, title),
+                target_title=os.path.join(inspection.target, tgt_t) if tgt_t else os.path.join(inspection.target, title),
+                in_source=in_source,
+                in_target=in_target,
+                cache=cache.get(title) if not case_insensitive else cache.get(src_t or tgt_t or title),
+                deep=deep,
+                probe=config.probe,
+                probe_timeout=options.timeout,
+                rsync_options=options,
+                policy=policy,
+                progress=progress,
+                library_name=library.name,
+            )
         )
-        for title in all_titles
-    ]
 
     results: list[TitleWork] = []
     total = len(contexts)

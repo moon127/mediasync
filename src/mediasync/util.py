@@ -142,6 +142,37 @@ def path_is_within(child: str, parent: str) -> bool:
         return False
 
 
+def is_case_insensitive(path: str) -> bool:
+    try:
+        base = os.path.dirname(os.path.abspath(path)) or "/"
+        test = os.path.join(base, ".mediasync_case_test_" + str(os.getpid()))
+        try:
+            with open(test, "w") as fh:
+                fh.write("x")
+            lower = test.lower()
+            upper = test.upper()
+            different = lower != upper
+            if different:
+                return os.path.lexists(lower) or os.path.lexists(upper)
+            return False
+        finally:
+            try:
+                os.unlink(test)
+            except OSError:
+                pass
+            try:
+                os.unlink(test.lower())
+            except OSError:
+                pass
+            try:
+                os.unlink(test.upper())
+            except OSError:
+                pass
+    except Exception:
+        return os.name == "nt"
+
+
+
 def validate_rel_path(value: str) -> str:
     if not value or "\x00" in value:
         raise SafetyError("empty or invalid path")
