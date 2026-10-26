@@ -347,3 +347,14 @@ Lint and formatting (optional):
 pip install -e ".[dev]"
 ruff check src tests
 ```
+
+### Per-file policy behavior
+
+- When a new title appears in source and parts are blacklisted, only non-blacklisted files are copied (`add_title` may carry `allowed_paths`); blacklisted subpaths are never transferred.
+- When a title exists only in target and whitelist/blacklist rules apply, policy is evaluated per file: whitelisted target files are held (`HELD`), blacklisted target files are ignored/skipped, others become per-file `DELETE` changes (subject to approval).
+- Title-level whitelist matches skip expansion into file deletes (content is protected). Title-level blacklist matches skip title entirely.
+
+### Cache invalidation
+
+- `fast` planning uses `tree_fingerprint` (names, sizes, mtimes, types) with a SHA256 digest (`source_digest`/`target_digest`). If digests/counts differ, the cache is not treated as clean even if `max_mtime` appears unchanged (nested file changes are detected).
+- `scan_mode = "deep"` forces a full re-scan regardless of cache.
