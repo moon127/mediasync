@@ -1,0 +1,7 @@
+# Keep existing target content for these titles.
+# New source content is still allowed.
+# One library-relative path or pattern per line.
+#
+# Andor
+# Babylon 5/Season 1
+# re:^Doctor Who/.*S0[1-9].*$

@@ -1,0 +1,5 @@
+# Ignore these movie paths completely.
+#
+# */Extras
+# */Featurettes
+# re:.*\.iso$

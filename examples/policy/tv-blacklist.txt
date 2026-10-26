@@ -1,0 +1,5 @@
+# Ignore these paths completely: no copy, update or delete.
+#
+# */Extras
+# */Sample
+# re:.*\.iso$

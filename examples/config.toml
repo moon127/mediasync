@@ -1,0 +1,53 @@
+# Example mediasync configuration.
+# Copy this file next to your policy directory and adjust the paths.
+
+state_dir = "~/.mediasync"
+concurrency = 8
+scan_mode = "fast"
+trash_retention_days = 30
+delete_mode = "trash"
+require_mount = true
+min_source_titles = 1
+max_source_title_drop_pct = 20
+report_html = true
+# notify_command = "terminal-notifier -title mediasync -message"
+
+[rsync]
+modify_window = 2
+fsync = true
+# extra_args = ["--bwlimit=50m", "--compress"]
+
+[apply]
+auto_approve = [
+  "add_title",
+  "add_media",
+  "add_sidecar",
+  "update_sidecar",
+  "delete_sidecar",
+  "reencode",
+]
+max_pending_deletions = 0
+max_delete_gb = 0
+bulk_reencode_count = 5
+
+[[libraries]]
+name = "TV"
+kind = "tv"
+source = "/Volumes/Multimedia/TV"
+target = "/Volumes/Media_UNAS/Dale/TV"
+whitelist = "policy/tv-whitelist.txt"
+blacklist = "policy/tv-blacklist.txt"
+
+[[libraries]]
+name = "Movies"
+kind = "movies"
+source = "/Volumes/Multimedia/Movies"
+target = "/Volumes/Media_UNAS/Dale/Movies"
+whitelist = "policy/movies-whitelist.txt"
+blacklist = "policy/movies-blacklist.txt"
+
+# Per-library rsync overrides are optional.
+# [libraries.rsync]
+# modify_window = 2
+# fsync = false
+# extra_args = ["--bwlimit=20m"]
