@@ -645,9 +645,64 @@ class MediasyncGui:
                             allow_pending=False,
                             progress=progress,
                         )
-                    except BaseException as exc:
+                    except Exception as exc:
+                        msg = str(exc)
+                        if "stale" in msg.lower():
+                            try:
+                                state.finish_run(run_id, "stale")
+                            except Exception:
+                                pass
+                            if messagebox.askyesno(
+                                "Plan is stale",
+                                "The plan is stale (source/target changed since planning).\n\n"
+                                "Re-plan and apply now?",
+                            ):
+                                try:
+                                    new_run_id = f"run-{now_stamp()}-{uuid.uuid4().hex[:6]}"
+                                    state.start_run(new_run_id, library.name, "gui-apply-replan", None)
+                                    fresh = plan_library(
+                                        self.config,
+                                        state,
+                                        library,
+                                        deep=False,
+                                        progress=progress,
+                                    )
+                                    if fresh.errors:
+                                        raise exc
+                                    pending_f = [
+                                        c for c in fresh.changes if c.decision == Decision.PENDING.value
+                                    ]
+                                    if pending_f:
+                                        raise exc
+                                    accepted_f = [
+                                        c for c in fresh.changes if c.decision == Decision.ACCEPTED.value
+                                    ]
+                                    if not accepted_f:
+                                        raise exc
+                                    result = apply_plan(
+                                        self.config,
+                                        state,
+                                        library,
+                                        fresh,
+                                        run_id=new_run_id,
+                                        allow_pending=False,
+                                        progress=progress,
+                                    )
+                                    try:
+                                        state.finish_run(new_run_id, result.status, {"plan_id": fresh.plan_id})
+                                    except Exception:
+                                        pass
+                                    if result.status == "applied":
+                                        try:
+                                            supersede_pending(self.config, library.name, fresh.plan_id)
+                                        except Exception:
+                                            pass
+                                    self.plan = fresh
+                                    return result
+                                except Exception:
+                                    pass
                         try:
-                            state.finish_run(run_id, "error", {"error": str(exc)})
+                            state.finish_run(run_id, "error", {"error": msg})
                         except Exception:
                             pass
                         raise

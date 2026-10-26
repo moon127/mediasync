@@ -424,8 +424,72 @@ def cmd_apply(args: argparse.Namespace) -> int:
                     progress=_progress,
                 )
             except PlanStaleError as exc:
+                if getattr(args, "replan_if_stale", False):
+                    try:
+                        print("Plan is stale; re-planning and applying...", file=sys.stderr)
+                        state.finish_run(run_id, "stale-replan")
+                        new_run_id = f"run-{now_stamp()}-{uuid.uuid4().hex[:6]}"
+                        state.start_run(new_run_id, library.name, "apply-replan", None)
+                        fresh_plan = plan_library(
+                            config,
+                            state,
+                            library,
+                            deep=False,
+                            progress=_progress,
+                        )
+                        if fresh_plan.errors:
+                            print(format_plan(fresh_plan), file=sys.stderr)
+                            state.finish_run(new_run_id, "plan-error")
+                            return EXIT_PLAN
+                        if fresh_plan.status in {"approval_required", "blocked"} and not args.allow_pending:
+                            print(format_plan(fresh_plan), file=sys.stderr)
+                            print(
+                                "Re-planned plan requires approval; approve it or use --allow-pending.",
+                                file=sys.stderr,
+                            )
+                            state.finish_run(new_run_id, "approval_required")
+                            return EXIT_APPROVAL
+                        result = apply_plan(
+                            config,
+                            state,
+                            library,
+                            fresh_plan,
+                            run_id=new_run_id,
+                            allow_pending=args.allow_pending,
+                            progress=_progress,
+                        )
+                        state.finish_run(
+                            new_run_id,
+                            result.status,
+                            {
+                                "plan_id": fresh_plan.plan_id,
+                                "applied": result.applied,
+                                "errors": result.errors,
+                            },
+                        )
+                        print(
+                            f"Apply {result.status}: applied={result.applied}, "
+                            f"retained={result.retained}, denied={result.denied}, "
+                            f"errors={len(result.errors)}"
+                        )
+                        for error in result.errors:
+                            print(f"ERROR {error}", file=sys.stderr)
+                        if result.status == "applied":
+                            supersede_pending(config, library.name, fresh_plan.plan_id)
+                        if result.status in {"partial", "failed"}:
+                            return EXIT_APPLY
+                        if result.status == "approval_required":
+                            return EXIT_APPROVAL
+                        return EXIT_OK
+                    except Exception as exc2:
+                        print(f"Re-plan/apply failed: {exc2}", file=sys.stderr)
+                        return EXIT_STALE
                 state.finish_run(run_id, "stale")
                 print(f"Plan is stale: {exc}", file=sys.stderr)
+                print(
+                    "Hint: use 'mediasync run' for atomic plan+apply, or 'mediasync apply <plan> --replan-if-stale'.",
+                    file=sys.stderr,
+                )
                 return EXIT_STALE
             except ApplyError as exc:
                 state.finish_run(run_id, "refused")
@@ -729,6 +793,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply = sub.add_parser("apply", help="apply an approved plan")
     apply.add_argument("plan_id")
     apply.add_argument("--allow-pending", action="store_true")
+    apply.add_argument("--replan-if-stale", action="store_true")
     apply.set_defaults(func=cmd_apply)
 
     status = sub.add_parser("status", help="show library, plan and trash status")
