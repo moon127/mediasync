@@ -53,6 +53,32 @@ class MediasyncGui:
         self.busy = False
         self._busy_widgets: list[Any] = []
         self._worker: queue.Queue | None = None
+        try:
+            style = ttk.Style(self.root)
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            style.configure(
+                "Treeview",
+                background="#ffffff",
+                fieldbackground="#ffffff",
+                foreground="#000000",
+                rowheight=22,
+            )
+            style.configure(
+                "Treeview.Heading",
+                background="#e9e9e9",
+                foreground="#000000",
+                relief="raised",
+            )
+            style.map(
+                "Treeview",
+                background=[("selected", "#4a90e2")],
+                foreground=[("selected", "#ffffff")],
+            )
+        except Exception:
+            pass
 
         names = [lib.name for lib in config.enabled_libraries()]
         if not names:
@@ -202,7 +228,17 @@ class MediasyncGui:
 
         details_frame = ttk.LabelFrame(outer, text="Selected change", padding=6)
         details_frame.pack(fill="x", pady=(4, 6))
-        self.details = tk.Text(details_frame, height=6, wrap="word", state="disabled")
+        self.details = tk.Text(
+            details_frame,
+            height=6,
+            wrap="word",
+            state="disabled",
+            background="#ffffff",
+            foreground="#000000",
+            insertbackground="#000000",
+            selectbackground="#4a90e2",
+            selectforeground="#ffffff",
+        )
         details_scroll = ttk.Scrollbar(
             details_frame, orient="vertical", command=self.details.yview
         )
@@ -674,7 +710,15 @@ class _PlanPicker:
         self.top.title("Pending plans")
         self.top.geometry("720x320")
         self.top.transient(parent)
-        self.listbox = tk.Listbox(self.top, selectmode="browse")
+        self.listbox = tk.Listbox(
+            self.top,
+            selectmode="browse",
+            background="#ffffff",
+            foreground="#000000",
+            selectbackground="#4a90e2",
+            selectforeground="#ffffff",
+            highlightthickness=0,
+        )
         for plan in plans:
             pending = sum(
                 1
