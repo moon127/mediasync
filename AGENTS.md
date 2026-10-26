@@ -116,7 +116,7 @@ This document captures the requirements, design decisions, and implementation ch
 
 ## Configuration notes
 - `state_dir`, `concurrency`, `scan_mode` (`fast`/`deep`), `trash_retention_days`, `delete_mode` (`trash`/`permanent`), `require_mount`, `min_source_titles`, `max_source_title_drop_pct`, `report_html`
-- `[rsync]`: `modify_window`, `fsync`, `extra_args` (allowlisted)
+- `[rsync]`: `modify_window`, `fsync`, `timeout` (default 600s, passed as `--timeout` to rsync; affects scan/copy subprocess timeouts), `extra_args` (allowlisted)
 - `[apply]`: `auto_approve` list, `max_pending_deletions`, `max_delete_gb`, `bulk_reencode_count`
 - `[[libraries]]`: `name`, `kind`, `source`, `target`, `whitelist`, `blacklist` (+ optional `[libraries.rsync]`)
 
