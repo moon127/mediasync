@@ -423,5 +423,56 @@ class GuiHelperTests(unittest.TestCase):
             self.assertEqual(result.moved, 1)
 
 
+class BlacklistBrowserHelperTests(unittest.TestCase):
+    def test_infer_pattern_type(self):
+        from mediasync import gui
+        self.assertEqual(gui.infer_pattern_type("*.mkv"), "glob")
+        self.assertEqual(gui.infer_pattern_type("Show?"), "glob")
+        self.assertEqual(gui.infer_pattern_type("[abc]"), "glob")
+        self.assertEqual(gui.infer_pattern_type("re:^foo$"), "regex")
+        self.assertEqual(gui.infer_pattern_type("RE:foo"), "regex")
+        self.assertEqual(gui.infer_pattern_type("Show Name"), "exact")
+        self.assertEqual(gui.infer_pattern_type(""), "exact")
+
+    def test_check_source_exists(self):
+        from mediasync import gui
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "source")
+            target = os.path.join(tmp, "target")
+            os.makedirs(source)
+            os.makedirs(target)
+            write(os.path.join(source, "Show", "ep.mkv"), b"x")
+            self.assertTrue(gui.check_source_exists(source, "Show"))
+            self.assertFalse(gui.check_source_exists(source, "Missing"))
+
+    def test_check_source_exists_case_insensitive_fallback(self):
+        from mediasync import gui
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "source")
+            os.makedirs(source)
+            write(os.path.join(source, "Show", "ep.mkv"), b"x")
+            self.assertTrue(gui.check_source_exists(source, "show"))
+
+    def test_get_blacklisted_items_with_status_enrichment(self):
+        from mediasync import gui
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "source")
+            target = os.path.join(tmp, "target")
+            os.makedirs(source)
+            write(os.path.join(target, "Remove Show", "ep.mkv"), b"x")
+            write(os.path.join(source, "Remove Show", "other.mkv"), b"y")
+            config = make_config(tmp, source, target)
+            library = config.library("TV")
+            items = gui.get_blacklisted_items_with_status(config, library)
+            self.assertEqual(len(items), 1)
+            item = items[0]
+            self.assertEqual(item["rel_path"], "Remove Show")
+            self.assertEqual(item["type"], "dir")
+            self.assertIn(item["pattern_type"], {"exact", "glob", "regex"})
+            self.assertEqual(item["exists_at_source"], "Yes")
+            self.assertEqual(item["protected"], "No")
+            self.assertIn("candidate", item)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1093,6 +1093,13 @@ class MediasyncGui:
             return
         _LibraryBrowser(self.root, self.config, self.current_library)
 
+    def _browse_blacklist(self) -> None:
+        if self.busy:
+            return
+        if tk is None or messagebox is None:
+            return
+        _BlacklistBrowser(self.root, self.config, self.current_library)
+
     def _build_menubar(self, names: list[str]) -> None:
         if tk is None or not hasattr(self.root, "menu"):
             pass
@@ -1131,6 +1138,7 @@ class MediasyncGui:
         policy_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Policy", menu=policy_menu)
         policy_menu.add_command(label="Browse Titles...", command=self._browse_library)
+        policy_menu.add_command(label="Browse Blacklisted Items...", command=self._browse_blacklist)
         policy_menu.add_command(label="Test Policy...", command=self._show_policy_tester)
         policy_menu.add_separator()
         policy_menu.add_command(label="Add Selected to Whitelist", command=lambda: self._add_policy("whitelist"))
@@ -1751,6 +1759,94 @@ class _TrashWindow:
         self._refresh()
 
 
+
+def infer_pattern_type(raw_pattern: str) -> str:
+    if not raw_pattern:
+        return "exact"
+    pattern = raw_pattern.strip()
+    if pattern.lower().startswith("re:"):
+        return "regex"
+    if any(ch in pattern for ch in ["*", "?", "[", "]"]):
+        return "glob"
+    return "exact"
+
+
+def check_source_exists(library_source: str, rel_path: str) -> bool | None:
+    if not library_source or not rel_path:
+        return None
+    try:
+        src_path = os.path.join(library_source, rel_path)
+        if os.path.lexists(src_path):
+            return True
+        try:
+            parent = os.path.dirname(src_path)
+            name = os.path.basename(src_path)
+            if parent and name and os.path.isdir(parent):
+                lname = name.lower()
+                try:
+                    for entry in os.scandir(parent):
+                        if entry.name.lower() == lname:
+                            return True
+                except Exception:
+                    pass
+            if os.sep not in str(rel_path).replace("/", os.sep):
+                title = str(rel_path).strip("/\\")
+                tname = title.lower()
+                try:
+                    for entry in os.scandir(library_source):
+                        if entry.name.lower() == tname:
+                            return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return None
+
+
+def get_blacklisted_items_with_status(
+    config: Config,
+    library: LibraryConfig,
+    policy: PolicySet | None = None,
+) -> list[dict[str, Any]]:
+    if policy is None:
+        try:
+            policy = PolicySet.load(library.whitelist, library.blacklist)
+        except Exception:
+            policy = PolicySet([], [])
+    try:
+        candidates = find_prune_candidates(config, library, policy)
+    except Exception:
+        candidates = []
+    items: list[dict[str, Any]] = []
+    for cand in candidates:
+        pattern_type = infer_pattern_type(cand.blacklisted_by or "")
+        exists = check_source_exists(library.source, cand.rel_path)
+        if exists is True:
+            exists_str = "Yes"
+        elif exists is False:
+            exists_str = "No"
+        else:
+            exists_str = "Unknown"
+        items.append(
+            {
+                "candidate": cand,
+                "rel_path": cand.rel_path,
+                "type": "dir" if cand.is_dir else "file",
+                "pattern": cand.blacklisted_by or cand.reason or "",
+                "pattern_type": pattern_type,
+                "exists_at_source": exists_str,
+                "protected": "Yes" if cand.protected else "No",
+                "size": human_size(cand.size),
+                "status": cand.status or ("protected" if cand.protected else "pending"),
+            }
+        )
+    return items
+
+
+
+
 def launch_gui(config: Config, library: str | None = None) -> int:
     if tk is None:
         raise ConfigError(
@@ -1767,6 +1863,193 @@ def launch_gui(config: Config, library: str | None = None) -> int:
     MediasyncGui(root, config, library)
     root.mainloop()
     return 0
+
+
+class BlacklistBrowser:
+    def __init__(self, parent: Any, config: Config, library_name: str) -> None:
+        self.config = config
+        self.library_name = library_name
+        try:
+            self.library = config.library(library_name)
+        except Exception:
+            self.library = None
+        self.policy = None
+        if self.library is not None:
+            try:
+                self.policy = PolicySet.load(self.library.whitelist, self.library.blacklist)
+            except Exception:
+                self.policy = PolicySet([], [])
+        self.items: list[dict[str, Any]] = []
+        self.candidates = []
+        self.top = tk.Toplevel(parent)
+        self.top.title(f"Browse Blacklisted Items - {library_name}")
+        self.top.geometry("1080x620")
+        self.top.minsize(880, 520)
+        self.top.transient(parent)
+        self.top.grab_set()
+        icon_path = _find_icon()
+        if icon_path and tk is not None:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.top.iconphoto(False, self._icon_image)
+            except Exception:
+                pass
+
+        top = ttk.Frame(self.top, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text=f"Library: {library_name}").pack(side="left")
+        ttk.Button(top, text="Refresh", command=self._refresh).pack(side="right")
+
+        frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        frame.pack(fill="both", expand=True)
+        columns = ("item", "type", "pattern", "pattern_type", "exists_source", "protected", "size", "status")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        headings = {
+            "item": "Item",
+            "type": "Type",
+            "pattern": "Matched Pattern",
+            "pattern_type": "Pattern Type",
+            "exists_source": "Exists at Source",
+            "protected": "Protected",
+            "size": "Size",
+            "status": "Status",
+        }
+        widths = {"item": 320, "type": 60, "pattern": 280, "pattern_type": 90, "exists_source": 110, "protected": 80, "size": 80, "status": 100}
+        for col in columns:
+            self.tree.heading(col, text=headings[col])
+            self.tree.column(col, width=widths[col], stretch=col in {"item", "pattern"})
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.info_var = tk.StringVar(value="")
+        info = ttk.Frame(self.top, padding=(10, 0, 10, 6))
+        info.pack(fill="x")
+        ttk.Label(info, textvariable=self.info_var).pack(side="left")
+
+        buttons = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Prune Selected", command=self._prune_selected).pack(side="left")
+        ttk.Button(buttons, text="Prune All Movable", command=self._prune_all_movable).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close", command=self.top.destroy).pack(side="right")
+
+        self._refresh()
+
+    def _refresh(self) -> None:
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self.items = []
+        self.candidates = []
+        if self.library is None:
+            self.info_var.set("Library not found.")
+            return
+        try:
+            self.items = get_blacklisted_items_with_status(self.config, self.library, self.policy)
+        except Exception:
+            self.items = []
+        total = len(self.items)
+        movable = 0
+        protected = 0
+        missing = 0
+        for idx, item in enumerate(self.items):
+            cand = item["candidate"]
+            self.candidates.append(cand)
+            if item["protected"] == "Yes":
+                protected += 1
+            else:
+                movable += 1
+            if item["exists_at_source"] == "No":
+                missing += 1
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    item["rel_path"],
+                    item["type"],
+                    item["pattern"],
+                    item["pattern_type"],
+                    item["exists_at_source"],
+                    item["protected"],
+                    item["size"],
+                    item["status"],
+                ),
+            )
+        self.info_var.set(
+            f"Total: {total} | Movable: {movable} | Protected: {protected} | Missing at Source: {missing}"
+        )
+
+    def _selected_candidates(self) -> list[Any]:
+        selected = []
+        for iid in self.tree.selection():
+            try:
+                idx = int(iid)
+                if idx < len(self.candidates):
+                    selected.append(self.candidates[idx])
+            except Exception:
+                continue
+        return selected
+
+    def _prune_selected(self) -> None:
+        if self.library is None or tk is None:
+            return
+        cands = self._selected_candidates()
+        if not cands:
+            messagebox.showinfo("Prune", "Select one or more blacklisted items to prune.")
+            return
+        self._do_prune(cands)
+
+    def _prune_all_movable(self) -> None:
+        if self.library is None or tk is None:
+            return
+        movable = [c for c in self.candidates if not c.protected]
+        if not movable:
+            messagebox.showinfo("Prune", "No movable (non-protected) items found.")
+            return
+        self._do_prune(movable)
+
+    def _do_prune(self, candidates) -> None:
+        if self.library is None or tk is None:
+            return
+        protected = [c for c in candidates if getattr(c, "protected", False)]
+        force = False
+        permanent = bool(getattr(self.config, "delete_mode", "trash") == "permanent")
+        if protected:
+            if not messagebox.askyesno(
+                "Protected items",
+                "Some selected items are protected by whitelist. Override protection with force?",
+            ):
+                return
+            force = True
+            try:
+                if simpledialog:
+                    resp = simpledialog.askstring("Confirm", "Type PRUNE to confirm:", parent=self.top)
+                    if not resp or resp.strip() != "PRUNE":
+                        messagebox.showerror("Cancelled", "Confirmation failed.")
+                        return
+            except Exception:
+                if not messagebox.askyesno("Confirm", "Type PRUNE was not confirmed. Continue anyway?"):
+                    return
+        if not messagebox.askyesno(
+            "Confirm prune",
+            f"Move {len(candidates)} item(s) to {'trash (permanent)' if permanent else 'trash'}?",
+        ):
+            return
+        try:
+            result = run_prune_action(self.config, self.library, candidates, force=force, permanent=permanent)
+        except Exception as exc:
+            messagebox.showerror("Prune failed", str(exc))
+            self._refresh()
+            return
+        msg = f"Pruned: moved={result.moved} skipped_protected={result.skipped_protected} errors={len(result.errors)}"
+        if result.errors:
+            messagebox.showwarning("Prune completed with errors", msg + "\n\n" + "\n".join(result.errors[:10]))
+        else:
+            messagebox.showinfo("Prune complete", msg)
+        self._refresh()
+
+
 
 
 class _LibraryBrowser:
