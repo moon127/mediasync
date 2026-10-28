@@ -33,6 +33,126 @@ from .util import FileLock, human_size, is_junk_name, now_stamp
 Progress = Callable[[str], None]
 
 
+def list_top_level_titles(source: str, target: str, policy: PolicySet | None = None) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    names: set[str] = set()
+    items: list[dict[str, Any]] = []
+    try:
+        if os.path.isdir(source):
+            for entry in os.listdir(source):
+                if is_junk_name(entry):
+                    continue
+                full = os.path.join(source, entry)
+                names.add(entry)
+                items.append({
+                    "name": entry,
+                    "in_source": True,
+                    "in_target": False,
+                    "is_dir": os.path.isdir(full),
+                })
+    except Exception:
+        pass
+    try:
+        if os.path.isdir(target):
+            for entry in os.listdir(target):
+                if is_junk_name(entry):
+                    continue
+                full = os.path.join(target, entry)
+                if entry in names:
+                    for it in items:
+                        if it["name"] == entry:
+                            it["in_target"] = True
+                            if not it.get("is_dir"):
+                                it["is_dir"] = os.path.isdir(full)
+                            break
+                else:
+                    names.add(entry)
+                    items.append({
+                        "name": entry,
+                        "in_source": False,
+                        "in_target": True,
+                        "is_dir": os.path.isdir(full),
+                    })
+    except Exception:
+        pass
+    items.sort(key=lambda x: x["name"].lower())
+    for idx, it in enumerate(items):
+        origin = []
+        if it["in_source"]:
+            origin.append("Source")
+        if it["in_target"]:
+            origin.append("Target")
+        origin_str = "/".join(origin) if origin else "—"
+        typ = "dir" if it.get("is_dir") else "file"
+        status = "—"
+        if policy is not None:
+            try:
+                match = policy.evaluate(it["name"])
+                if match.kind == "blacklist" and match.pattern:
+                    status = f"Blacklisted ({match.pattern})"
+                elif match.kind == "whitelist" and match.pattern:
+                    status = f"Whitelisted ({match.pattern})"
+                else:
+                    status = "—"
+            except Exception:
+                status = "—"
+        entries.append({
+            "name": it["name"],
+            "origin": origin_str,
+            "type": typ,
+            "policy": status,
+            "in_source": it["in_source"],
+            "in_target": it["in_target"],
+        })
+    return entries
+
+
+def cancel_running_for_libraries(state: State, libraries) -> int:
+    cancelled = 0
+    for lib in libraries:
+        try:
+            name = getattr(lib, "name", lib)
+        except Exception:
+            continue
+        try:
+            active = state.active_run_progress(name)
+            if active and active.get("status") == "running":
+                try:
+                    state.finish_run(active["id"], "cancelled", summary="Cancelled on GUI exit")
+                    cancelled += 1
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    return cancelled
+
+
+def run_prune_action(
+    config: Config,
+    library,
+    candidates,
+    force: bool = False,
+    permanent: bool = False,
+    progress: Progress | None = None,
+) -> Any:
+    import uuid
+
+    from .util import now_stamp
+
+    run_id = f"prune-{now_stamp()}-{uuid.uuid4().hex[:6]}"
+    with _lock(config):
+        with State(config.state_dir) as state:
+            return prune_targets(
+                config,
+                state,
+                library,
+                candidates,
+                run_id,
+                permanent=permanent,
+                force=force,
+                progress=progress,
+            )
+
 def _find_icon() -> str | None:
     candidates = []
     here = Path(__file__).resolve()
@@ -954,14 +1074,8 @@ class MediasyncGui:
                 return
         if not messagebox.askyesno("Confirm prune", f"Move {len([c for c in candidates if not c.protected or force])} items to {'trash (permanent)' if permanent else 'trash'}?"):
             return
-        import uuid
-        from .util import now_stamp
-        run_id = f"prune-{now_stamp()}-{uuid.uuid4().hex[:6]}"
-
         def work(progress):
-            with _lock(self.config):
-                with State(self.config.state_dir) as state:
-                    return prune_targets(self.config, state, library, candidates, run_id, permanent=permanent, force=force, progress=progress)
+            return run_prune_action(self.config, library, candidates, force=force, permanent=permanent, progress=progress)
 
         def done(result):
             msg = f"Pruned: moved={result.moved} skipped_protected={result.skipped_protected} errors={len(result.errors)}"
@@ -1095,6 +1209,11 @@ class MediasyncGui:
                     rsync_backend.kill_all_active()
                 except Exception:
                     pass
+                try:
+                    with State(self.config.state_dir) as state:
+                        cancel_running_for_libraries(state, self.config.enabled_libraries())
+                except Exception:
+                    pass
                 self.root.destroy()
                 return
             try:
@@ -1110,13 +1229,7 @@ class MediasyncGui:
                     pass
                 try:
                     with State(self.config.state_dir) as state:
-                        for lib in self.config.enabled_libraries():
-                            try:
-                                active = state.active_run_progress(lib.name)
-                                if active and active.get("status") == "running":
-                                    state.finish_run(active["id"], "cancelled", summary="Cancelled on GUI exit")
-                            except Exception:
-                                continue
+                        cancel_running_for_libraries(state, self.config.enabled_libraries())
                 except Exception:
                     pass
                 self.root.destroy()
@@ -1126,6 +1239,11 @@ class MediasyncGui:
                     return
                 try:
                     rsync_backend.kill_all_active()
+                except Exception:
+                    pass
+                try:
+                    with State(self.config.state_dir) as state:
+                        cancel_running_for_libraries(state, self.config.enabled_libraries())
                 except Exception:
                     pass
                 self.root.destroy()
@@ -1741,63 +1859,24 @@ class _LibraryBrowser:
         self._reload_policy()
         source = self.library.source
         target = self.library.target
-        names = set()
-        items = []
-        # scan source
         try:
-            if os.path.isdir(source):
-                for entry in os.listdir(source):
-                    if is_junk_name(entry):
-                        continue
-                    full = os.path.join(source, entry)
-                    names.add(entry)
-                    items.append({
-                        "name": entry,
-                        "in_source": True,
-                        "in_target": False,
-                        "is_dir": os.path.isdir(full),
-                    })
+            rows = list_top_level_titles(source, target, self.policy)
         except Exception:
-            pass
-        # scan target
-        try:
-            if os.path.isdir(target):
-                for entry in os.listdir(target):
-                    if is_junk_name(entry):
-                        continue
-                    full = os.path.join(target, entry)
-                    if entry in names:
-                        for it in items:
-                            if it["name"] == entry:
-                                it["in_target"] = True
-                                if not it.get("is_dir"):
-                                    it["is_dir"] = os.path.isdir(full)
-                                break
-                    else:
-                        names.add(entry)
-                        items.append({
-                            "name": entry,
-                            "in_source": False,
-                            "in_target": True,
-                            "is_dir": os.path.isdir(full),
-                        })
-        except Exception:
-            pass
-        items.sort(key=lambda x: x["name"].lower())
-        self.entries = items
-        for idx, it in enumerate(items):
-            origin = []
-            if it["in_source"]:
-                origin.append("Source")
-            if it["in_target"]:
-                origin.append("Target")
-            origin_str = "/".join(origin) if origin else "—"
-            typ = "dir" if it.get("is_dir") else "file"
-            status = self._policy_status(it["name"])
-            self.tree.insert("", "end", iid=f"lib-{idx}", values=(it["name"], origin_str, typ, status))
+            rows = []
+        self.entries = [
+            {
+                "name": r["name"],
+                "in_source": r.get("in_source", False),
+                "in_target": r.get("in_target", False),
+                "is_dir": r.get("type") == "dir",
+            }
+            for r in rows
+        ]
+        for idx, r in enumerate(rows):
+            self.tree.insert("", "end", iid=f"lib-{idx}", values=(r["name"], r["origin"], r["type"], r["policy"]))
         src_ok = os.path.isdir(source)
         tgt_ok = os.path.isdir(target)
-        self.info_var.set(f"Source: {'OK' if src_ok else 'missing/unreadable'}  |  Target: {'OK' if tgt_ok else 'missing/unreadable'}  |  {len(items)} top-level items")
+        self.info_var.set(f"Source: {'OK' if src_ok else 'missing/unreadable'}  |  Target: {'OK' if tgt_ok else 'missing/unreadable'}  |  {len(rows)} top-level items")
 
     def _selected_names(self) -> list[str]:
         names = []

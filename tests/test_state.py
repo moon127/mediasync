@@ -72,5 +72,42 @@ class TrashListingTests(unittest.TestCase):
                 self.assertIsNotNone(all_entries[0]["restored_at"])
 
 
+    def test_update_run_progress_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with State(tmp) as state:
+                state.update_run_progress(
+                    "apply-1",
+                    library="TV",
+                    plan_id="plan-1",
+                    files_total=10,
+                    files_done=3,
+                    bytes_total=1024,
+                    bytes_done=256,
+                    current="Show/ep.mkv",
+                    status="running",
+                    mode="apply",
+                )
+                run = state.get_run_progress("apply-1")
+                self.assertEqual(run["library"], "TV")
+                self.assertEqual(run["plan_id"], "plan-1")
+                self.assertEqual(run["files_total"], 10)
+                self.assertEqual(run["files_done"], 3)
+                self.assertEqual(run["bytes_total"], 1024)
+                self.assertEqual(run["bytes_done"], 256)
+                self.assertEqual(run["current"], "Show/ep.mkv")
+                self.assertEqual(run["status"], "running")
+                state.update_run_progress(
+                    "apply-1",
+                    files_done=10,
+                    bytes_done=1024,
+                    current="done",
+                )
+                run = state.get_run_progress("apply-1")
+                self.assertEqual(run["files_done"], 10)
+                self.assertEqual(run["bytes_done"], 1024)
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

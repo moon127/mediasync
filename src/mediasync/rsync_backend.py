@@ -6,6 +6,7 @@ import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -520,7 +521,18 @@ def run_command(
     except FileNotFoundError as exc:
         raise RsyncError("rsync executable not found") from exc
 
-    _register_process(proc)
+    pgid = _register_process(proc)
+    timed_out = threading.Event()
+    stop_watchdog = threading.Event()
+
+    def _watchdog() -> None:
+        if stop_watchdog.wait(timeout):
+            return
+        timed_out.set()
+        _kill_target(proc, pgid, _SIGKILL)
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
 
     last_update = 0.0
     stderr_lines: list[str] = []
@@ -601,6 +613,21 @@ def run_command(
             stdout_data = proc.stdout.read() or b""
     except Exception:
         stdout_data = b""
+
+    stop_watchdog.set()
+    watchdog.join(timeout=1)
+
+    if timed_out.is_set():
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        _unregister_process(proc)
+        return CommandResult(
+            returncode=124,
+            stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}\n" + "".join(stderr_lines),
+            command=cmd,
+        )
 
     try:
         proc.wait(timeout=timeout)

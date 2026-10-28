@@ -5,20 +5,25 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
+import mediasync.rsync_backend as rb
 from mediasync.models import DEFAULT_EXCLUDES, RsyncOptions
 from mediasync.rsync_backend import (
     SEPARATOR,
     RsyncOptionError,
+    _add_progress_flags,
     _parse_progress_line,
     active_rsync_count,
     copy_files_command,
     copy_title_command,
+    get_rsync_version,
     kill_all_active,
     parse_scan_output,
     run_command,
     scan_command,
     scan_title,
+    supports_progress2,
     validate_extra_args,
 )
 
@@ -179,6 +184,134 @@ class ProgressParserTests(unittest.TestCase):
         self.assertIsNone(_parse_progress_line(""))
         self.assertIsNone(_parse_progress_line("sending incremental file list"))
         self.assertIsNone(_parse_progress_line("rsync error: some warning"))
+
+
+class ProgressFlagTests(unittest.TestCase):
+    def test_adds_progress2_when_supported(self):
+        with mock.patch("mediasync.rsync_backend.supports_progress2", return_value=True):
+            cmd = _add_progress_flags(["rsync", "src", "dst"], enable=True)
+        self.assertEqual(cmd, ["rsync", "--info=progress2", "src", "dst"])
+
+    def test_falls_back_to_progress_flag(self):
+        with mock.patch("mediasync.rsync_backend.supports_progress2", return_value=False):
+            cmd = _add_progress_flags(["rsync", "src", "dst"], enable=True)
+        self.assertEqual(cmd, ["rsync", "--progress", "src", "dst"])
+
+    def test_disabled_returns_unmodified_command(self):
+        cmd = ["rsync", "src", "dst"]
+        self.assertIs(_add_progress_flags(cmd, enable=False), cmd)
+
+    def test_copy_commands_include_progress_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            options = RsyncOptions(modify_window=2, fsync=False, timeout=30)
+            source = os.path.join(tmp, "src")
+            target = os.path.join(tmp, "dst")
+            with mock.patch("mediasync.rsync_backend.supports_progress2", return_value=True):
+                title_cmd = copy_title_command(source, target, options, progress=True)
+                files_cmd = copy_files_command(
+                    source,
+                    target,
+                    options,
+                    os.path.join(tmp, "backup"),
+                    progress=True,
+                )
+            self.assertIn("--info=progress2", title_cmd)
+            self.assertIn("--info=progress2", files_cmd)
+
+
+class RsyncVersionTests(unittest.TestCase):
+    def tearDown(self):
+        rb._RSYNC_VERSION_CACHE = None
+
+    def test_get_version_parses_output(self):
+        rb._RSYNC_VERSION_CACHE = None
+        proc = mock.Mock(stdout="rsync  version 3.2.7  protocol version 31\n", stderr="")
+        with mock.patch("mediasync.rsync_backend.subprocess.run", return_value=proc):
+            self.assertEqual(get_rsync_version(), (3, 2))
+        with mock.patch("mediasync.rsync_backend.subprocess.run", return_value=proc) as run:
+            self.assertEqual(get_rsync_version(), (3, 2))
+            run.assert_not_called()
+
+    def test_get_version_handles_failures(self):
+        rb._RSYNC_VERSION_CACHE = None
+        with mock.patch("mediasync.rsync_backend.subprocess.run", side_effect=OSError):
+            self.assertIsNone(get_rsync_version())
+        rb._RSYNC_VERSION_CACHE = None
+        proc = mock.Mock(stdout="no version here", stderr="")
+        with mock.patch("mediasync.rsync_backend.subprocess.run", return_value=proc):
+            self.assertIsNone(get_rsync_version())
+
+    def test_supports_progress2(self):
+        for version, expected in [
+            (None, False),
+            ((2, 6), False),
+            ((3, 0), False),
+            ((3, 1), True),
+            ((3, 2), True),
+            ((4, 0), True),
+        ]:
+            with self.subTest(version=version):
+                with mock.patch(
+                    "mediasync.rsync_backend.get_rsync_version", return_value=version
+                ):
+                    self.assertEqual(supports_progress2(), expected)
+
+
+class RunCommandProgressTests(unittest.TestCase):
+    def test_progress_callback_and_total_bytes_override(self):
+        script = (
+            "import sys,time;"
+            "sys.stderr.write('  500  10%  1MB/s  0:00:01\\n');"
+            "sys.stderr.flush();"
+            "time.sleep(0.05)"
+        )
+        updates = []
+        result = run_command(
+            [sys.executable, "-c", script],
+            progress_cb=updates.append,
+            total_bytes_hint=1000,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(updates)
+        self.assertEqual(updates[0]["transferred"], 500)
+        self.assertEqual(updates[0]["percent"], 50)
+
+    def test_carriage_return_progress_is_parsed(self):
+        script = (
+            "import sys;"
+            "sys.stderr.write('  100  25%  1MB/s  0:00:01\\r');"
+            "sys.stderr.flush()"
+        )
+        updates = []
+        result = run_command(
+            [sys.executable, "-c", script],
+            progress_cb=updates.append,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(updates)
+        self.assertEqual(updates[0]["percent"], 25)
+
+    def test_timeout_is_enforced_while_streaming(self):
+        script = "import time; time.sleep(30)"
+        start = time.monotonic()
+        result = run_command(
+            [sys.executable, "-c", script],
+            progress_cb=lambda _data: None,
+            timeout=1,
+        )
+        elapsed = time.monotonic() - start
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("timed out", result.stderr)
+        self.assertLess(elapsed, 10)
+        self.assertEqual(active_rsync_count(), 0)
+
+    def test_missing_binary_raises(self):
+        from mediasync.rsync_backend import RsyncError
+
+        with self.assertRaises(RsyncError):
+            run_command(["definitely-not-a-real-binary"], progress_cb=lambda _d: None)
 
 
 @unittest.skipIf(os.name == "nt", "process group handling is POSIX-specific")

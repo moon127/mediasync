@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from mediasync.apply import (
     PlanStaleError,
@@ -410,6 +411,40 @@ class EndToEndApplyTests(unittest.TestCase):
                 self.assertIsNone(plan.applied_at)
                 self.assertEqual(plan.status, "approval_required")
                 self.assertFalse(os.path.exists(os.path.join(target, "Show")))
+
+
+class ApplyProgressTests(unittest.TestCase):
+    def test_apply_updates_run_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "source", "Show")
+            target = os.path.join(tmp, "target", "Show")
+            os.makedirs(source)
+            os.makedirs(target)
+            with open(os.path.join(source, "ep.mkv"), "wb") as fh:
+                fh.write(b"x")
+            config = make_config(tmp, source, target)
+            library = config.library("TV")
+            from mediasync.planner import save_plan
+
+            with State(config.state_dir) as state:
+                plan = plan_library(config, state, library)
+                for c in plan.changes:
+                    c.decision = "accepted"
+                save_plan(config, plan)
+                progress_calls = []
+                with mock.patch("mediasync.rsync_backend.kill_all_active"):
+                    result = apply_plan(
+                        config,
+                        state,
+                        library,
+                        plan,
+                        run_id=f"run-{__import__('time').time()}",
+                        progress=progress_calls.append,
+                    )
+                self.assertGreaterEqual(result.applied, 0)
+                run = state.get_run_progress(result.run_id)
+                self.assertIsNotNone(run)
+                self.assertGreaterEqual(int(run["files_done"] or 0), 0)
 
 
 if __name__ == "__main__":

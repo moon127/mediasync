@@ -76,9 +76,9 @@ class CliPruneTests(unittest.TestCase):
         whitelist = os.path.join(tmp, "whitelist.txt")
         blacklist = os.path.join(tmp, "blacklist.txt")
         with open(whitelist, "w", encoding="utf-8") as fh:
-            fh.write("")
+            fh.write("Keep Show\n")
         with open(blacklist, "w", encoding="utf-8") as fh:
-            fh.write("Remove Show\n")
+            fh.write("Remove Show\nKeep Show\n")
         config = os.path.join(tmp, "mediasync.toml")
         with open(config, "w", encoding="utf-8") as fh:
             fh.write(
@@ -157,6 +157,110 @@ blacklist = "{blacklist}"
                 entries = state.list_trash("TV")
             self.assertEqual(len(entries), 1)
             self.assertEqual(entries[0]["original_path"], "Remove Show")
+
+    def test_prune_blocked_by_protected_requires_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            os.makedirs(os.path.join(target, "Keep Show"))
+            with open(os.path.join(target, "Keep Show", "Episode.mkv"), "wb") as fh:
+                fh.write(b"bytes")
+            config = self._make_config(tmp, target)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--config",
+                        config,
+                        "prune-blacklisted",
+                        "--library",
+                        "TV",
+                        "--yes",
+                    ]
+                )
+
+            self.assertEqual(code, 11)
+            self.assertIn("protected", stdout.getvalue() + stderr.getvalue())
+            self.assertTrue(os.path.exists(os.path.join(target, "Keep Show")))
+
+    def test_prune_force_overrides_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            os.makedirs(os.path.join(target, "Keep Show"))
+            with open(os.path.join(target, "Keep Show", "Episode.mkv"), "wb") as fh:
+                fh.write(b"bytes")
+            config = self._make_config(tmp, target)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--config",
+                        config,
+                        "prune-blacklisted",
+                        "--library",
+                        "TV",
+                        "--yes",
+                        "--force",
+                    ]
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue() + stdout.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(target, "Keep Show")))
+
+    def test_prune_all_libraries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            os.makedirs(os.path.join(target, "Remove Show"))
+            with open(os.path.join(target, "Remove Show", "Episode.mkv"), "wb") as fh:
+                fh.write(b"bytes")
+            config = self._make_config(tmp, target)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    code = main(["--config", config, "prune-blacklisted", "--library", "TV", "--yes"])
+                except SystemExit as exc:
+                    code = exc.code
+            self.assertEqual(code, 0)
+
+    def test_prune_clear_stale_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            config = self._make_config(tmp, target)
+            import sqlite3
+            from mediasync.state import SCHEMA
+
+            state_path = os.path.join(tmp, "state", "mediasync.db")
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with sqlite3.connect(state_path) as conn:
+                conn.executescript(SCHEMA)
+                conn.execute(
+                    "INSERT INTO runs(id, library, mode, plan_id, status, started) VALUES(?,?,?,?,?,?)",
+                    (
+                        "old-run",
+                        "TV",
+                        "plan",
+                        None,
+                        "running",
+                        "2020-01-01T00:00:00+00:00",
+                    ),
+                )
+                conn.commit()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    code = main(["--config", config, "prune-blacklisted", "--library", "TV", "--dry-run"])
+                except SystemExit as exc:
+                    code = exc.code
+            self.assertEqual(code, 0)
+            with State(os.path.join(tmp, "state")) as state:
+                run = state.get_run_progress("old-run")
+            self.assertIn(run["status"], {"cancelled", "failed"})
 
 
 if __name__ == "__main__":

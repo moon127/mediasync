@@ -103,8 +103,10 @@ This document captures the requirements, design decisions, and implementation ch
 
 ## Testing
 - Framework: stdlib `unittest` (no pytest required)
-- Run: `PYTHONPATH=src python3 -m unittest discover -s tests -q` (74 tests OK)
-- Coverage areas: policy, rsync backend (incl. integration, progress parsing, process kill), classifier, util (tree_fingerprint), config, apply (per-file policy, re-encode backup, held-only, stale verification), prune (candidates, protected/force, trash), state (stale runs, trash filtering), report, cli (run, prune)
+- Run: `PYTHONPATH=src python3 -m unittest discover -s tests -q` (101 tests OK)
+- Coverage: `PYTHONPATH=src python3 -m coverage run --source=mediasync -m unittest discover -s tests -q && python3 -m coverage report -m` (target **>90%** for all new/changed modules; current overall may be lower due to GUI/CLI paths, but new pure helpers and backend logic must meet or exceed target)
+- Policy: **Every new feature or fix must include tests.** No code is considered complete without test coverage. Exceptions for failing tests require explicit human approval.
+- Coverage areas: policy, rsync backend (incl. integration, progress parsing, process kill, timeout, flags/version), classifier, util (tree_fingerprint), config, apply (per-file policy, re-encode backup, held-only, stale verification, progress), prune (candidates, protected/force/permanent, reports, progress, CLI), state (stale runs, trash filtering, progress), report, cli (run, prune), gui pure helpers (library listing, cancel runs, prune action)
 
 ## Conventions
 - Python 3.11+, type hints
