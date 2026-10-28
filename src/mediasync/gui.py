@@ -21,12 +21,12 @@ from .apply import apply_plan
 from .config import Config, ConfigError
 from .models import Change, Decision, Plan
 from .planner import pending_plans, plan_library, save_plan, supersede_pending
-from .policy import PolicySet, add_pattern
+from .policy import PolicySet, add_pattern, remove_pattern
 from .prune import find_prune_candidates, prune_targets
 from .report import ACTION_LABEL, ACTION_ORDER, DECISION_LABEL, plan_stats
 from .state import State
 from .trash import TrashError, list_trash, purge, restore
-from .util import FileLock, human_size, now_stamp, now_iso
+from .util import FileLock, human_size, is_junk_name, now_stamp, now_iso
 
 Progress = Callable[[str], None]
 
@@ -939,7 +939,7 @@ class MediasyncGui:
             if not messagebox.askyesno("Override protection", "You are about to override whitelist protection. This is dangerous. Continue?"):
                 return
             try:
-                resp = tk.simpledialog.askstring("Confirm", "Type PRUNE to confirm:", parent=self.root)
+                resp = simpledialog.askstring("Confirm", "Type PRUNE to confirm:", parent=self.root) if simpledialog else None
             except Exception:
                 resp = None
             if not resp or resp.strip() != "PRUNE":
@@ -965,6 +965,13 @@ class MediasyncGui:
 
         self._run_async("Pruning blacklisted...", work, done)
 
+    def _browse_library(self) -> None:
+        if self.busy:
+            return
+        if tk is None or messagebox is None:
+            return
+        _LibraryBrowser(self.root, self.config, self.current_library)
+
     def _build_menubar(self, names: list[str]) -> None:
         if tk is None or not hasattr(self.root, "menu"):
             pass
@@ -989,6 +996,8 @@ class MediasyncGui:
         menubar.add_cascade(label="Library", menu=lib_menu)
         for name in names:
             lib_menu.add_command(label=name, command=lambda n=name: self._switch_library_menu(n))
+        lib_menu.add_separator()
+        lib_menu.add_command(label="Browse Titles...", command=self._browse_library)
 
         plan_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Plan", menu=plan_menu)
@@ -1000,6 +1009,7 @@ class MediasyncGui:
 
         policy_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Policy", menu=policy_menu)
+        policy_menu.add_command(label="Browse Titles...", command=self._browse_library)
         policy_menu.add_command(label="Test Policy...", command=self._show_policy_tester)
         policy_menu.add_separator()
         policy_menu.add_command(label="Add Selected to Whitelist", command=lambda: self._add_policy("whitelist"))
@@ -1583,3 +1593,202 @@ def launch_gui(config: Config, library: str | None = None) -> int:
     MediasyncGui(root, config, library)
     root.mainloop()
     return 0
+
+
+class _LibraryBrowser:
+    def __init__(self, parent: Any, config: Config, library_name: str) -> None:
+        self.config = config
+        self.library_name = library_name
+        try:
+            self.library = config.library(library_name)
+        except Exception:
+            self.library = None
+        self.policy = None
+        if self.library is not None:
+            try:
+                self.policy = PolicySet.load(self.library.whitelist, self.library.blacklist)
+            except Exception:
+                self.policy = PolicySet([], [])
+        self.entries: list[dict[str, Any]] = []
+        self.top = tk.Toplevel(parent)
+        self.top.title(f"Browse Library Titles - {library_name}")
+        self.top.geometry("920x560")
+        self.top.transient(parent)
+        icon_path = _find_icon()
+        if icon_path:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.top.iconphoto(False, self._icon_image)
+            except Exception:
+                pass
+
+        top = ttk.Frame(self.top, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text=f"Library: {library_name}").pack(side="left")
+        ttk.Button(top, text="Refresh", command=self._refresh).pack(side="right")
+        ttk.Label(top, text="Union of source + target (top-level only)").pack(side="left", padx=12)
+
+        frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        frame.pack(fill="both", expand=True)
+        columns = ("name", "origin", "type", "policy")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
+        headings = {"name": "Name", "origin": "Source/Target", "type": "Type", "policy": "Policy"}
+        widths = {"name": 420, "origin": 140, "type": 80, "policy": 200}
+        for col in columns:
+            self.tree.heading(col, text=headings[col])
+            self.tree.column(col, width=widths[col], stretch=col == "name")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="top", fill="both", expand=True)
+        scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+
+        info = ttk.Frame(self.top, padding=(10, 0, 10, 6))
+        info.pack(fill="x")
+        self.info_var = tk.StringVar(value="")
+        ttk.Label(info, textvariable=self.info_var).pack(side="left")
+
+        buttons = ttk.Frame(self.top, padding=(10, 0, 10, 10))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Add to Whitelist", command=lambda: self._add("whitelist")).pack(side="left")
+        ttk.Button(buttons, text="Add to Blacklist", command=lambda: self._add("blacklist")).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Test in Policy Tester", command=self._test_policy).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Close", command=self.top.destroy).pack(side="right")
+
+        self._refresh()
+
+    def _reload_policy(self) -> None:
+        if self.library is None:
+            self.policy = PolicySet([], [])
+            return
+        try:
+            self.policy = PolicySet.load(self.library.whitelist, self.library.blacklist)
+        except Exception:
+            self.policy = PolicySet([], [])
+
+    def _policy_status(self, name: str) -> str:
+        if self.policy is None:
+            return "—"
+        match = self.policy.evaluate(name)
+        if match.kind == "blacklist" and match.pattern:
+            return f"Blacklisted ({match.pattern})"
+        if match.kind == "whitelist" and match.pattern:
+            return f"Whitelisted ({match.pattern})"
+        return "—"
+
+    def _refresh(self) -> None:
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self.entries = []
+        if self.library is None:
+            self.info_var.set("Library not found.")
+            return
+        self._reload_policy()
+        source = self.library.source
+        target = self.library.target
+        names = set()
+        items = []
+        # scan source
+        try:
+            if os.path.isdir(source):
+                for entry in os.listdir(source):
+                    if is_junk_name(entry):
+                        continue
+                    full = os.path.join(source, entry)
+                    names.add(entry)
+                    items.append({
+                        "name": entry,
+                        "in_source": True,
+                        "in_target": False,
+                        "is_dir": os.path.isdir(full),
+                    })
+        except Exception:
+            pass
+        # scan target
+        try:
+            if os.path.isdir(target):
+                for entry in os.listdir(target):
+                    if is_junk_name(entry):
+                        continue
+                    full = os.path.join(target, entry)
+                    if entry in names:
+                        for it in items:
+                            if it["name"] == entry:
+                                it["in_target"] = True
+                                if not it.get("is_dir"):
+                                    it["is_dir"] = os.path.isdir(full)
+                                break
+                    else:
+                        names.add(entry)
+                        items.append({
+                            "name": entry,
+                            "in_source": False,
+                            "in_target": True,
+                            "is_dir": os.path.isdir(full),
+                        })
+        except Exception:
+            pass
+        items.sort(key=lambda x: x["name"].lower())
+        self.entries = items
+        for idx, it in enumerate(items):
+            origin = []
+            if it["in_source"]:
+                origin.append("Source")
+            if it["in_target"]:
+                origin.append("Target")
+            origin_str = "/".join(origin) if origin else "—"
+            typ = "dir" if it.get("is_dir") else "file"
+            status = self._policy_status(it["name"])
+            self.tree.insert("", "end", iid=f"lib-{idx}", values=(it["name"], origin_str, typ, status))
+        src_ok = os.path.isdir(source)
+        tgt_ok = os.path.isdir(target)
+        self.info_var.set(f"Source: {'OK' if src_ok else 'missing/unreadable'}  |  Target: {'OK' if tgt_ok else 'missing/unreadable'}  |  {len(items)} top-level items")
+
+    def _selected_names(self) -> list[str]:
+        names = []
+        for iid in self.tree.selection():
+            vals = self.tree.item(iid, "values")
+            if vals:
+                names.append(vals[0])
+        return names
+
+    def _add(self, kind: str) -> None:
+        if self.library is None:
+            return
+        path = self.library.whitelist if kind == "whitelist" else self.library.blacklist
+        if not path:
+            messagebox.showerror("No policy file", f"No {kind} file is configured for {self.library.name}.")
+            return
+        selected = self._selected_names()
+        if not selected:
+            messagebox.showinfo("Nothing selected", "Select one or more titles first.")
+            return
+        patterns = sorted(set(selected))
+        preview = "\n".join(patterns[:12])
+        if len(patterns) > 12:
+            preview += f"\n... and {len(patterns) - 12} more"
+        if not messagebox.askyesno(
+            "Update policy",
+            f"Add {len(patterns)} pattern(s) to the {kind} for {self.library.name}?\n\n"
+            f"{preview}\n\nWriting to: {path}\n\nThis affects future plans.",
+        ):
+            return
+        added = 0
+        for pattern in patterns:
+            try:
+                if add_pattern(path, pattern):
+                    added += 1
+            except Exception as exc:
+                messagebox.showerror("Policy update failed", str(exc))
+                return
+        messagebox.showinfo(
+            "Policy updated",
+            f"Added {added} new {kind} pattern(s); {len(patterns) - added} already present.\n\n{path}",
+        )
+        self._refresh()
+
+    def _test_policy(self) -> None:
+        selected = self._selected_names()
+        if not selected:
+            messagebox.showinfo("Test Policy", "Select one or more titles first.")
+            return
+        _PolicyTester(self.top, self.config, self.library_name)
