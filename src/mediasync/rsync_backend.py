@@ -4,6 +4,7 @@ import atexit
 import logging
 import os
 import signal
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
