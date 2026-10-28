@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import atexit
 import logging
 import os
-import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -12,6 +13,9 @@ from .models import RsyncOptions
 from .util import ensure_dir
 
 LOG = logging.getLogger(__name__)
+
+_ACTIVE_PROCS: set[subprocess.Popen] = set()
+_ACTIVE_PGIDS: set[int] = set()
 
 SEPARATOR = "|"
 
@@ -383,6 +387,91 @@ def _parse_progress_line(line: str) -> dict | None:
     return None
 
 
+def active_rsync_count() -> int:
+    # clean up dead processes
+    dead = []
+    for proc in list(_ACTIVE_PROCS):
+        try:
+            if proc.poll() is not None:
+                dead.append(proc)
+        except Exception:
+            dead.append(proc)
+    for proc in dead:
+        _ACTIVE_PROCS.discard(proc)
+        try:
+            if proc.pid:
+                pgid = os.getpgid(proc.pid)
+                _ACTIVE_PGIDS.discard(pgid)
+        except Exception:
+            pass
+    return len(_ACTIVE_PROCS)
+
+
+def kill_all_active(grace_timeout: float = 2.0) -> dict:
+    killed = 0
+    failed = 0
+    # kill process groups first
+    for pgid in list(_ACTIVE_PGIDS):
+        try:
+            if os.name != "nt":
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                pass
+        except Exception:
+            failed += 1
+            continue
+    # also kill individual processes
+    time.sleep(0.1)
+    for proc in list(_ACTIVE_PROCS):
+        try:
+            if proc.poll() is None:
+                if os.name != "nt":
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                    except Exception:
+                        proc.terminate()
+                else:
+                    proc.terminate()
+                killed += 1
+        except Exception:
+            failed += 1
+    time.sleep(grace_timeout)
+    for pgid in list(_ACTIVE_PGIDS):
+        try:
+            if os.name != "nt":
+                os.killpg(pgid, signal.SIGKILL)
+        except Exception:
+            pass
+    for proc in list(_ACTIVE_PROCS):
+        try:
+            if proc.poll() is None:
+                if os.name != "nt":
+                    try:
+                        pgid = os.getpgid(proc.pid)
+                        os.killpg(pgid, signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                else:
+                    proc.kill()
+        except Exception:
+            pass
+    # cleanup
+    _ACTIVE_PROCS.clear()
+    _ACTIVE_PGIDS.clear()
+    return {"killed": killed, "failed": failed}
+
+
+def _atexit_cleanup() -> None:
+    try:
+        kill_all_active(grace_timeout=0.5)
+    except Exception:
+        pass
+
+
+atexit.register(_atexit_cleanup)
+
+
 def run_command(
     cmd: list[str],
     *,
@@ -416,14 +505,29 @@ def run_command(
         )
 
     try:
+        kwargs = {}
+        if os.name != "nt":
+            kwargs["start_new_session"] = True
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE if input_data is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            **kwargs,
         )
     except FileNotFoundError as exc:
         raise RsyncError("rsync executable not found") from exc
+
+    try:
+        if proc.pid:
+            try:
+                pgid = os.getpgid(proc.pid)
+                _ACTIVE_PGIDS.add(pgid)
+            except Exception:
+                pass
+        _ACTIVE_PROCS.add(proc)
+    except Exception:
+        pass
 
     last_update = 0.0
     stderr_lines: list[str] = []
@@ -483,10 +587,8 @@ def run_command(
                                 except Exception:
                                     pass
                             _emit(parsed)
-                    # Also try to parse if it's a progress line without line ending
                     parsed = _parse_progress_line(buffer)
                     if parsed and ("\r" in text or "--info=progress2" in " ".join(cmd)):
-                        # might be updating in place
                         if total_bytes_hint and parsed.get("transferred"):
                             try:
                                 transferred = int(parsed["transferred"])
@@ -511,7 +613,23 @@ def run_command(
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            proc.kill()
+            if os.name != "nt":
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+            else:
+                proc.kill()
+        except Exception:
+            pass
+        try:
+            _ACTIVE_PROCS.discard(proc)
+            if proc.pid:
+                try:
+                    _ACTIVE_PGIDS.discard(os.getpgid(proc.pid))
+                except Exception:
+                    pass
         except Exception:
             pass
         return CommandResult(
@@ -519,6 +637,16 @@ def run_command(
             stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}\n" + "".join(stderr_lines),
             command=cmd,
         )
+
+    try:
+        _ACTIVE_PROCS.discard(proc)
+        if proc.pid:
+            try:
+                _ACTIVE_PGIDS.discard(os.getpgid(proc.pid))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     return CommandResult(
         returncode=proc.returncode,

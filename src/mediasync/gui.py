@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - depends on the Python build
     ttk = None
     messagebox = None
 
+from . import rsync_backend
 from .apply import apply_plan
 from .config import Config, ConfigError
 from .models import Change, Decision, Plan
@@ -1074,10 +1075,54 @@ class MediasyncGui:
             pass
 
     def _close(self) -> None:
-        if self.busy:
-            if not messagebox.askyesno(
-                "Quit", "An operation is still running. Quit anyway?"
-            ):
+        try:
+            active_rsync = rsync_backend.active_rsync_count()
+        except Exception:
+            active_rsync = 0
+        if self.busy or active_rsync > 0:
+            msg = "An operation is in progress"
+            if active_rsync > 0:
+                msg += f" ({active_rsync} rsync transfer(s) running)"
+            msg += ". Exiting now will stop transfers mid-way. Partial files may remain."
+            if messagebox is None:
+                try:
+                    rsync_backend.kill_all_active()
+                except Exception:
+                    pass
+                self.root.destroy()
+                return
+            try:
+                resp = messagebox.askyesno(
+                    "Exit MediaSync",
+                    msg + "\n\nKill transfers and exit?",
+                )
+                if not resp:
+                    return
+                try:
+                    rsync_backend.kill_all_active()
+                except Exception:
+                    pass
+                try:
+                    with State(self.config.state_dir) as state:
+                        for lib in self.config.enabled_libraries():
+                            try:
+                                active = state.active_run_progress(lib.name)
+                                if active and active.get("status") == "running":
+                                    state.finish_run(active["id"], "cancelled", summary="Cancelled on GUI exit")
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+                self.root.destroy()
+                return
+            except Exception:
+                if not messagebox.askyesno("Quit", "An operation is still running. Quit anyway and kill transfers?"):
+                    return
+                try:
+                    rsync_backend.kill_all_active()
+                except Exception:
+                    pass
+                self.root.destroy()
                 return
         self.root.destroy()
 
