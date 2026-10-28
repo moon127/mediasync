@@ -921,16 +921,17 @@ class MediasyncGui:
     def _prune_blacklisted(self) -> None:
         self._preview_prune()
 
-    def _prune_blacklisted_confirm(self, candidates, force=False, permanent=False) -> None:
+    def _prune_blacklisted_confirm(self, candidates, force=False, permanent=False, library=None) -> None:
         if self.busy:
             return
+        library = library or self._library()
         try:
             with State(self.config.state_dir) as state:
                 try:
                     state.clear_stale_runs(max_age_minutes=60)
                 except Exception:
                     pass
-                active = state.active_run_progress(self.current_library)
+                active = state.active_run_progress(library.name)
                 if active:
                     messagebox.showerror("Busy", "An apply/prune is already running for this library.")
                     return
@@ -1288,7 +1289,12 @@ class _PrunePreviewDialog:
 
     def _confirm(self):
         self.top.destroy()
-        self.on_confirm(self.candidates, force=self.force_var.get(), permanent=self.perm_var.get())
+        self.on_confirm(
+            self.candidates,
+            force=self.force_var.get(),
+            permanent=self.perm_var.get(),
+            library=self.library,
+        )
 
 
 class _TrashWindow:
