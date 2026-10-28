@@ -28,7 +28,7 @@ from .prune import find_prune_candidates, prune_targets
 from .report import ACTION_LABEL, ACTION_ORDER, DECISION_LABEL, plan_stats
 from .state import State
 from .trash import TrashError, list_trash, purge, restore
-from .util import FileLock, human_size, is_junk_name, now_stamp
+from .util import FileLock, human_size, is_junk_name, list_visible_titles, now_stamp
 
 Progress = Callable[[str], None]
 
