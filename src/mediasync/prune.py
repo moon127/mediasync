@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import report
 from .config import Config
 from .models import LibraryConfig
 from .policy import PolicySet
 from .state import State
-from .trash import quarantine, trash_root
-from .util import human_size, list_visible_titles, now_iso, now_stamp
+from .trash import quarantine
+from .util import human_size, list_visible_titles, now_iso
 
 LOG = logging.getLogger(__name__)
 Progress = Callable[[str], None]

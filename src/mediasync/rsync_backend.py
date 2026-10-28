@@ -3,8 +3,8 @@ from __future__ import annotations
 import atexit
 import logging
 import os
-import signal
 import re
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -15,8 +15,9 @@ from .util import ensure_dir
 
 LOG = logging.getLogger(__name__)
 
-_ACTIVE_PROCS: set[subprocess.Popen] = set()
-_ACTIVE_PGIDS: set[int] = set()
+_ACTIVE_PROCS: dict[subprocess.Popen, int | None] = {}
+_SIGTERM = getattr(signal, "SIGTERM", 15)
+_SIGKILL = getattr(signal, "SIGKILL", 9)
 
 SEPARATOR = "|"
 
@@ -299,7 +300,7 @@ def scan_title(
         )
     except FileNotFoundError as exc:
         raise RsyncError("rsync executable not found") from exc
-    except subprocess.TimeoutExpired as exc:
+    except subprocess.TimeoutExpired:
         return ScanResult(
             errors=[f"rsync scan timed out after {process_timeout}s: {_format_command(cmd)}"],
             returncode=124,
@@ -388,78 +389,78 @@ def _parse_progress_line(line: str) -> dict | None:
     return None
 
 
-def active_rsync_count() -> int:
-    # clean up dead processes
-    dead = []
-    for proc in list(_ACTIVE_PROCS):
+def _register_process(proc: subprocess.Popen) -> int | None:
+    pgid: int | None = None
+    if proc.pid:
         try:
-            if proc.poll() is not None:
-                dead.append(proc)
+            pgid = os.getpgid(proc.pid)
         except Exception:
-            dead.append(proc)
-    for proc in dead:
-        _ACTIVE_PROCS.discard(proc)
+            pgid = None
+    _ACTIVE_PROCS[proc] = pgid
+    return pgid
+
+
+def _close_pipes(proc: subprocess.Popen) -> None:
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
         try:
-            if proc.pid:
-                pgid = os.getpgid(proc.pid)
-                _ACTIVE_PGIDS.discard(pgid)
+            if stream is not None:
+                stream.close()
         except Exception:
             pass
+
+
+def _unregister_process(proc: subprocess.Popen) -> None:
+    _ACTIVE_PROCS.pop(proc, None)
+    _close_pipes(proc)
+
+
+def active_rsync_count() -> int:
+    dead = [proc for proc in _ACTIVE_PROCS if proc.poll() is not None]
+    for proc in dead:
+        _unregister_process(proc)
     return len(_ACTIVE_PROCS)
 
 
+def _kill_target(proc: subprocess.Popen, pgid: int | None, sig: int) -> bool:
+    try:
+        if os.name != "nt" and pgid is not None:
+            os.killpg(pgid, sig)
+        elif sig == _SIGTERM:
+            proc.terminate()
+        else:
+            proc.kill()
+        return True
+    except ProcessLookupError:
+        return True
+    except Exception:
+        return False
+
+
 def kill_all_active(grace_timeout: float = 2.0) -> dict:
-    killed = 0
+    active = [(proc, pgid) for proc, pgid in _ACTIVE_PROCS.items() if proc.poll() is None]
+    killed = len(active)
     failed = 0
-    # kill process groups first
-    for pgid in list(_ACTIVE_PGIDS):
-        try:
-            if os.name != "nt":
-                os.killpg(pgid, signal.SIGTERM)
-            else:
-                pass
-        except Exception:
+
+    for proc, pgid in active:
+        if not _kill_target(proc, pgid, _SIGTERM):
             failed += 1
-            continue
-    # also kill individual processes
-    time.sleep(0.1)
-    for proc in list(_ACTIVE_PROCS):
+
+    deadline = time.monotonic() + max(0.0, grace_timeout)
+    for proc, _pgid in active:
+        remaining = max(0.0, deadline - time.monotonic())
         try:
-            if proc.poll() is None:
-                if os.name != "nt":
-                    try:
-                        pgid = os.getpgid(proc.pid)
-                        os.killpg(pgid, signal.SIGTERM)
-                    except Exception:
-                        proc.terminate()
-                else:
-                    proc.terminate()
-                killed += 1
-        except Exception:
-            failed += 1
-    time.sleep(grace_timeout)
-    for pgid in list(_ACTIVE_PGIDS):
-        try:
-            if os.name != "nt":
-                os.killpg(pgid, signal.SIGKILL)
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            pass
         except Exception:
             pass
-    for proc in list(_ACTIVE_PROCS):
-        try:
-            if proc.poll() is None:
-                if os.name != "nt":
-                    try:
-                        pgid = os.getpgid(proc.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        proc.kill()
-                else:
-                    proc.kill()
-        except Exception:
-            pass
-    # cleanup
+
+    for proc, pgid in active:
+        if proc.poll() is None:
+            _kill_target(proc, pgid, _SIGKILL)
+        _unregister_process(proc)
+
     _ACTIVE_PROCS.clear()
-    _ACTIVE_PGIDS.clear()
     return {"killed": killed, "failed": failed}
 
 
@@ -492,7 +493,7 @@ def run_command(
             )
         except FileNotFoundError as exc:
             raise RsyncError("rsync executable not found") from exc
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             return CommandResult(
                 returncode=124,
                 stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}",
@@ -519,16 +520,7 @@ def run_command(
     except FileNotFoundError as exc:
         raise RsyncError("rsync executable not found") from exc
 
-    try:
-        if proc.pid:
-            try:
-                pgid = os.getpgid(proc.pid)
-                _ACTIVE_PGIDS.add(pgid)
-            except Exception:
-                pass
-        _ACTIVE_PROCS.add(proc)
-    except Exception:
-        pass
+    _register_process(proc)
 
     last_update = 0.0
     stderr_lines: list[str] = []
@@ -617,37 +609,21 @@ def run_command(
             if os.name != "nt":
                 try:
                     pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGKILL)
+                    os.killpg(pgid, _SIGKILL)
                 except Exception:
                     proc.kill()
             else:
                 proc.kill()
         except Exception:
             pass
-        try:
-            _ACTIVE_PROCS.discard(proc)
-            if proc.pid:
-                try:
-                    _ACTIVE_PGIDS.discard(os.getpgid(proc.pid))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        _unregister_process(proc)
         return CommandResult(
             returncode=124,
             stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}\n" + "".join(stderr_lines),
             command=cmd,
         )
 
-    try:
-        _ACTIVE_PROCS.discard(proc)
-        if proc.pid:
-            try:
-                _ACTIVE_PGIDS.discard(os.getpgid(proc.pid))
-            except Exception:
-                pass
-    except Exception:
-        pass
+    _unregister_process(proc)
 
     return CommandResult(
         returncode=proc.returncode,

@@ -1,15 +1,22 @@
 import os
 import shutil
+import sys
 import tempfile
+import threading
+import time
 import unittest
 
 from mediasync.models import DEFAULT_EXCLUDES, RsyncOptions
 from mediasync.rsync_backend import (
     SEPARATOR,
     RsyncOptionError,
+    _parse_progress_line,
+    active_rsync_count,
     copy_files_command,
     copy_title_command,
+    kill_all_active,
     parse_scan_output,
+    run_command,
     scan_command,
     scan_title,
     validate_extra_args,
@@ -148,6 +155,64 @@ class ScanParserTests(unittest.TestCase):
         changes, warnings = parse_scan_output("nonsense\n")
         self.assertEqual(changes, [])
         self.assertEqual(len(warnings), 1)
+
+
+class ProgressParserTests(unittest.TestCase):
+    def test_parses_progress2_line(self):
+        parsed = _parse_progress_line("  1,234,567  45%  12.34MB/s  0:00:12")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["transferred"], 1234567)
+        self.assertEqual(parsed["percent"], 45)
+        self.assertEqual(parsed["speed"], "12.34MB/s")
+        self.assertEqual(parsed["eta"], "0:00:12")
+
+    def test_parses_classic_progress_line_with_trailing_details(self):
+        parsed = _parse_progress_line(
+            "  1,234,567  45%  12.34MB/s    0:00:12 (xfr#1, to-chk=0/5)"
+        )
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["transferred"], 1234567)
+        self.assertEqual(parsed["percent"], 45)
+        self.assertEqual(parsed["eta"], "0:00:12")
+
+    def test_ignores_non_progress_lines(self):
+        self.assertIsNone(_parse_progress_line(""))
+        self.assertIsNone(_parse_progress_line("sending incremental file list"))
+        self.assertIsNone(_parse_progress_line("rsync error: some warning"))
+
+
+@unittest.skipIf(os.name == "nt", "process group handling is POSIX-specific")
+class ActiveProcessTests(unittest.TestCase):
+    def test_run_command_registers_and_unregisters_process(self):
+        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        thread = threading.Thread(
+            target=run_command,
+            kwargs={
+                "cmd": cmd,
+                "progress_cb": lambda _data: None,
+                "timeout": 30,
+            },
+        )
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(kill_all_active, 0.1)
+
+        deadline = time.monotonic() + 5
+        while active_rsync_count() == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(active_rsync_count(), 1)
+
+        result = kill_all_active(grace_timeout=0.1)
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(active_rsync_count(), 0)
+        self.assertGreaterEqual(result["killed"], 1)
+
+    def test_kill_all_active_with_no_processes_is_safe(self):
+        self.assertEqual(active_rsync_count(), 0)
+        result = kill_all_active(grace_timeout=0)
+        self.assertEqual(result["killed"], 0)
+        self.assertEqual(result["failed"], 0)
 
 
 if __name__ == "__main__":

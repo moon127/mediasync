@@ -11,23 +11,24 @@ from typing import Any, Callable
 
 try:
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import messagebox, simpledialog, ttk
 except ImportError:  # pragma: no cover - depends on the Python build
     tk = None
     ttk = None
     messagebox = None
+    simpledialog = None
 
 from . import rsync_backend
 from .apply import apply_plan
 from .config import Config, ConfigError
 from .models import Change, Decision, Plan
 from .planner import pending_plans, plan_library, save_plan, supersede_pending
-from .policy import PolicySet, add_pattern, remove_pattern
+from .policy import PolicySet, add_pattern
 from .prune import find_prune_candidates, prune_targets
 from .report import ACTION_LABEL, ACTION_ORDER, DECISION_LABEL, plan_stats
 from .state import State
 from .trash import TrashError, list_trash, purge, restore
-from .util import FileLock, human_size, is_junk_name, now_stamp, now_iso
+from .util import FileLock, human_size, is_junk_name, now_stamp
 
 Progress = Callable[[str], None]
 

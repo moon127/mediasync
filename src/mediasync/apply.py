@@ -158,9 +158,6 @@ def _verify_directory(
     if abs(mtime - planned_mtime) > window_ns:
         raise PlanStaleError(f"{title}: directory mtime changed in {root}")
     if count != planned_count:
-        if is_case_insensitive(root):
-            # be more lenient on case-insensitive filesystems
-            return
         raise PlanStaleError(f"{title}: directory entry count changed in {root}")
 
 
@@ -171,15 +168,7 @@ def _stat_matches(path: str, size: int, mtime_ns: int, window_ns: int) -> bool:
         return False
     if st.st_size != size:
         return False
-    if abs(st.st_mtime_ns - mtime_ns) <= window_ns:
-        return True
-    # be more lenient on case-insensitive or network filesystems
-    try:
-        if is_case_insensitive(os.path.dirname(path)):
-            return True
-    except Exception:
-        pass
-    return False
+    return abs(st.st_mtime_ns - mtime_ns) <= window_ns
 
 
 def apply_plan(

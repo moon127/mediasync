@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import UTC
 from typing import Any
 
 from .models import TitleFingerprint
@@ -424,9 +425,9 @@ class State:
         try:
             from datetime import datetime, timedelta
 
-            cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).strftime(
-                "%Y-%m-%dT%H:%M:%S"
-            )
+            cutoff = (
+                datetime.now(UTC) - timedelta(minutes=max_age_minutes)
+            ).isoformat(timespec="seconds")
         except Exception:
             return 0
         cur = self.conn.execute(

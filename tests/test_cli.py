@@ -69,5 +69,95 @@ target = "{os.path.join(target, 'Movies')}"
                 self.assertEqual({row["library"] for row in runs}, {"TV", "Movies"})
 
 
+class CliPruneTests(unittest.TestCase):
+    def _make_config(self, tmp: str, target: str) -> str:
+        source = os.path.join(tmp, "source")
+        os.makedirs(source, exist_ok=True)
+        whitelist = os.path.join(tmp, "whitelist.txt")
+        blacklist = os.path.join(tmp, "blacklist.txt")
+        with open(whitelist, "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(blacklist, "w", encoding="utf-8") as fh:
+            fh.write("Remove Show\n")
+        config = os.path.join(tmp, "mediasync.toml")
+        with open(config, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"""
+state_dir = "{os.path.join(tmp, 'state')}"
+require_mount = false
+min_source_titles = 0
+max_source_title_drop_pct = 100
+report_html = false
+
+[rsync]
+fsync = false
+
+[[libraries]]
+name = "TV"
+kind = "tv"
+source = "{source}"
+target = "{target}"
+whitelist = "{whitelist}"
+blacklist = "{blacklist}"
+"""
+            )
+        return config
+
+    def test_prune_dry_run_leaves_target_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            os.makedirs(os.path.join(target, "Remove Show"))
+            with open(os.path.join(target, "Remove Show", "Episode.mkv"), "wb") as fh:
+                fh.write(b"bytes")
+            config = self._make_config(tmp, target)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--config",
+                        config,
+                        "prune-blacklisted",
+                        "--library",
+                        "TV",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertIn("Remove Show", stdout.getvalue())
+            self.assertTrue(os.path.exists(os.path.join(target, "Remove Show")))
+
+    def test_prune_moves_blacklisted_title_to_trash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            os.makedirs(os.path.join(target, "Remove Show"))
+            with open(os.path.join(target, "Remove Show", "Episode.mkv"), "wb") as fh:
+                fh.write(b"bytes")
+            config = self._make_config(tmp, target)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--config",
+                        config,
+                        "prune-blacklisted",
+                        "--library",
+                        "TV",
+                        "--yes",
+                    ]
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            self.assertFalse(os.path.exists(os.path.join(target, "Remove Show")))
+            with State(os.path.join(tmp, "state")) as state:
+                entries = state.list_trash("TV")
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["original_path"], "Remove Show")
+
+
 if __name__ == "__main__":
     unittest.main()

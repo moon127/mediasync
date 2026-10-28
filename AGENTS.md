@@ -31,12 +31,13 @@ This document captures the requirements, design decisions, and implementation ch
 ### Modules (src/mediasync/)
 | Module | Responsibility |
 | --- | --- |
-| `cli.py` | Argparse, commands (init/config/plan/run/pending/show/approve/deny/apply/status/policy/trash/gui), exit codes, locking, run orchestration |
+| `cli.py` | Argparse, commands (init/config/plan/run/pending/show/approve/deny/apply/status/policy/trash/prune-blacklisted/gui), exit codes, locking, run orchestration |
 | `config.py` | TOML load/validate, defaults, `init_config` (writes templates), per-library rsync overrides, allowlists |
 | `models.py` | Enums (`Action`, `Decision`, `PlanStatus`), `FileInfo`, `Change` (categories/destructive/size/ident/signature), `TitleFingerprint`, `Plan`, `LibraryConfig`, `Config` |
 | `planner.py` | Per-title planning (thread pool), policy evaluation, fingerprints/cache, bulk guards, title walks, per-file policy expansion, `pending_plans` filter, plan load/find/save |
 | `apply.py` | Stale verification, apply accepted changes by title, rsync copy/add/delete/quarantine, re-encode handling/backups, verification, cache refresh, audit |
-| `rsync_backend.py` | Safe rsync command builder (base flags), allowlist validation for `extra_args`, itemized scan parser (`SEPARATOR="|"`, handles `*deleting`), `copy_title`/`copy_files` |
+| `prune.py` | Blacklist-driven target pruning: candidate discovery (whitelist protection, force override), quarantine to trash, text/HTML prune reports |
+| `rsync_backend.py` | Safe rsync command builder (base flags), allowlist validation for `extra_args`, itemized scan parser (`SEPARATOR="|"`, handles `*deleting`), progress2 parsing, active-process registry/kill for clean GUI exit, `copy_title`/`copy_files` |
 | `classifier.py` | Re-encode detection, episode keys, ffprobe integration, merge logic |
 | `policy.py` | Load rules, match types (exact/glob/regex), specificity calc, precedence (specificity; blacklist wins ties), evaluate |
 | `safety.py` | Mount checks, overlap checks, root filesystem rejection, title counts, `inspect_library` |
@@ -102,8 +103,8 @@ This document captures the requirements, design decisions, and implementation ch
 
 ## Testing
 - Framework: stdlib `unittest` (no pytest required)
-- Run: `PYTHONPATH=src python3 -m unittest discover -s tests -q` (56 tests OK)
-- Coverage areas: policy, rsync backend (incl. integration), classifier, util (tree_fingerprint), config, apply (per-file policy, re-encode backup, held-only), report, cli
+- Run: `PYTHONPATH=src python3 -m unittest discover -s tests -q` (74 tests OK)
+- Coverage areas: policy, rsync backend (incl. integration, progress parsing, process kill), classifier, util (tree_fingerprint), config, apply (per-file policy, re-encode backup, held-only, stale verification), prune (candidates, protected/force, trash), state (stale runs, trash filtering), report, cli (run, prune)
 
 ## Conventions
 - Python 3.11+, type hints

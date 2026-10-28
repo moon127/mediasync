@@ -24,7 +24,7 @@ from .planner import (
     save_plan,
     supersede_pending,
 )
-from .policy import PolicySet, add_pattern, load_rules, remove_pattern
+from .policy import PolicySet, add_pattern, remove_pattern
 from .prune import find_prune_candidates, prune_targets
 from .report import format_plan, format_trash, write_html
 from .safety import SafetyError, describe_mount, inspect_library
@@ -39,7 +39,6 @@ from .util import (
     FileLock,
     LockHeld,
     human_size,
-    now_iso,
     now_stamp,
     notify,
     setup_logging,
@@ -181,7 +180,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     exit_code = EXIT_SAFETY
                     continue
-                report_path = _write_plan_report(
+                _write_plan_report(
                     config, plan, _html_flag(config, args.html)
                 )
                 plans.append(plan)
@@ -239,7 +238,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     report_parts.append(text)
                     codes.append(EXIT_SAFETY)
                     continue
-                report_path = _write_plan_report(
+                _write_plan_report(
                     config, plan, _html_flag(config, None)
                 )
                 report_parts.append(format_plan(plan))

@@ -3,7 +3,13 @@ import shutil
 import tempfile
 import unittest
 
-from mediasync.apply import PlanStaleError, _verify_directory, apply_plan, verify_plan
+from mediasync.apply import (
+    PlanStaleError,
+    _stat_matches,
+    _verify_directory,
+    apply_plan,
+    verify_plan,
+)
 from mediasync.config import load_config
 from mediasync.models import Change, Decision, FileInfo, Plan, TitleFingerprint
 from mediasync.planner import pending_plans, plan_library
@@ -49,6 +55,36 @@ target = "{target}"
 """
         )
     return load_config(path)
+
+
+class StatMatchTests(unittest.TestCase):
+    def test_size_change_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "file.mkv")
+            write(path, b"1234")
+            st = os.stat(path)
+            self.assertFalse(_stat_matches(path, 5, st.st_mtime_ns, 2_000_000_000))
+
+    def test_mtime_change_outside_window_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "file.mkv")
+            write(path, b"1234")
+            st = os.stat(path)
+            old_ns = st.st_mtime_ns - 10_000_000_000
+            os.utime(path, ns=(old_ns, old_ns))
+            self.assertFalse(_stat_matches(path, 4, st.st_mtime_ns, 2_000_000_000))
+
+    def test_mtime_change_within_window_is_tolerated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "file.mkv")
+            write(path, b"1234")
+            st = os.stat(path)
+            near_ns = st.st_mtime_ns + 1_000_000_000
+            os.utime(path, ns=(near_ns, near_ns))
+            self.assertTrue(_stat_matches(path, 4, st.st_mtime_ns, 2_000_000_000))
+
+    def test_missing_file_does_not_match(self):
+        self.assertFalse(_stat_matches("/nonexistent/path.mkv", 1, 0, 2_000_000_000))
 
 
 class ApplyVerificationTests(unittest.TestCase):
