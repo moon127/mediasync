@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
+import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .models import RsyncOptions
 from .util import ensure_dir
@@ -29,6 +32,8 @@ ALLOWED_EXTRA_OPTIONS = {
     "--ipv4",
     "--ipv6",
 }
+
+_RSYNC_VERSION_CACHE: tuple[int, int] | None = None
 
 
 class RsyncError(RuntimeError):
@@ -101,6 +106,7 @@ def copy_title_command(
     target_title: str,
     options: RsyncOptions,
     partial_dir: str | None = None,
+    progress: bool = False,
 ) -> list[str]:
     cmd = ["rsync"]
     cmd.extend(_common_args(options, apply=True))
@@ -108,6 +114,8 @@ def copy_title_command(
         ensure_dir(partial_dir)
         cmd.extend(["--partial-dir", partial_dir])
     cmd.extend([_with_slash(source_title), _with_slash(target_title)])
+    if progress:
+        cmd = _add_progress_flags(cmd, enable=True)
     return cmd
 
 
@@ -117,6 +125,7 @@ def copy_files_command(
     options: RsyncOptions,
     backup_dir: str,
     partial_dir: str | None = None,
+    progress: bool = False,
 ) -> list[str]:
     ensure_dir(backup_dir)
     cmd = [
@@ -133,11 +142,65 @@ def copy_files_command(
         ensure_dir(partial_dir)
         cmd.extend(["--partial-dir", partial_dir])
     cmd.extend([_with_slash(source_title), _with_slash(target_title)])
+    if progress:
+        cmd = _add_progress_flags(cmd, enable=True)
     return cmd
 
 
 def _with_slash(path: str) -> str:
     return path if path.endswith(os.sep) else path + os.sep
+
+
+def get_rsync_version() -> tuple[int, int] | None:
+    global _RSYNC_VERSION_CACHE
+    if _RSYNC_VERSION_CACHE is not None:
+        return _RSYNC_VERSION_CACHE
+    try:
+        proc = subprocess.run(
+            ["rsync", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            timeout=5,
+        )
+    except Exception:
+        return None
+    text = proc.stdout or proc.stderr or ""
+    match = re.search(r"rsync\s+version\s+(\d+)\.(\d+)", text)
+    if not match:
+        return None
+    try:
+        version = (int(match.group(1)), int(match.group(2)))
+    except Exception:
+        return None
+    _RSYNC_VERSION_CACHE = version
+    return version
+
+
+def supports_progress2() -> bool:
+    version = get_rsync_version()
+    if version is None:
+        return False
+    major, minor = version
+    if major > 3:
+        return True
+    if major == 3 and minor >= 1:
+        return True
+    return False
+
+
+def _add_progress_flags(cmd: list[str], *, enable: bool) -> list[str]:
+    if not enable:
+        return cmd
+    if supports_progress2():
+        result = list(cmd)
+        result.insert(1, "--info=progress2")
+        return result
+    result = list(cmd)
+    result.insert(1, "--progress")
+    return result
 
 
 @dataclass
@@ -261,32 +324,148 @@ def scan_title(
     return result
 
 
+_PROGRESS_RE = re.compile(
+    r"(?P<transferred>[\d,]+)\s+(?P<percent>\d+)%\s+(?P<speed>[^\s]+)\s+(?P<eta>[^\s]+)"
+)
+
+
+def _parse_progress_line(line: str) -> dict | None:
+    if not line:
+        return None
+    line = line.strip()
+    if not line:
+        return None
+    match = _PROGRESS_RE.search(line)
+    if not match:
+        return None
+    try:
+        transferred = int(match.group("transferred").replace(",", ""))
+    except Exception:
+        transferred = 0
+    try:
+        percent = int(match.group("percent"))
+    except Exception:
+        percent = 0
+    speed = match.group("speed")
+    eta = match.group("eta")
+    return {
+        "transferred": transferred,
+        "percent": percent,
+        "speed": speed,
+        "eta": eta,
+        "raw": line,
+    }
+
+
 def run_command(
     cmd: list[str],
     *,
     input_data: bytes | None = None,
     timeout: int = 3600,
+    progress_cb: Callable[[dict], None] | None = None,
+    total_bytes_hint: int | None = None,
 ) -> CommandResult:
+    if progress_cb is None:
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=input_data,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise RsyncError("rsync executable not found") from exc
+        except subprocess.TimeoutExpired as exc:
+            return CommandResult(
+                returncode=124,
+                stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}",
+                command=cmd,
+            )
+        return CommandResult(
+            returncode=proc.returncode,
+            stdout=proc.stdout.decode("utf-8", "surrogateescape"),
+            stderr=proc.stderr.decode("utf-8", "surrogateescape"),
+            command=cmd,
+        )
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            input=input_data,
+            stdin=subprocess.PIPE if input_data is not None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise RsyncError("rsync executable not found") from exc
-    except subprocess.TimeoutExpired as exc:
+
+    last_update = 0.0
+    stderr_lines: list[str] = []
+
+    def _emit(data: dict) -> None:
+        nonlocal last_update
+        now = time.monotonic()
+        if now - last_update < 0.25:
+            return
+        last_update = now
+        try:
+            progress_cb(data)
+        except Exception:
+            pass
+
+    try:
+        if input_data is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(input_data)
+                proc.stdin.close()
+            except Exception:
+                pass
+
+        # Read stderr for progress (rsync outputs progress there)
+        if proc.stderr is not None:
+            for line in proc.stderr:
+                try:
+                    text = line.decode("utf-8", "surrogateescape")
+                except Exception:
+                    continue
+                stderr_lines.append(text)
+                parsed = _parse_progress_line(text)
+                if parsed:
+                    if total_bytes_hint and parsed.get("transferred"):
+                        try:
+                            transferred = int(parsed["transferred"])
+                            if total_bytes_hint > 0:
+                                parsed["percent"] = min(100, int((transferred / total_bytes_hint) * 100))
+                        except Exception:
+                            pass
+                    _emit(parsed)
+    except Exception:
+        pass
+
+    try:
+        stdout_data = b""
+        if proc.stdout is not None:
+            stdout_data = proc.stdout.read() or b""
+    except Exception:
+        stdout_data = b""
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
         return CommandResult(
             returncode=124,
-            stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}",
+            stderr=f"rsync timed out after {timeout}s: {_format_command(cmd)}\n" + "".join(stderr_lines),
             command=cmd,
         )
+
     return CommandResult(
         returncode=proc.returncode,
-        stdout=proc.stdout.decode("utf-8", "surrogateescape"),
-        stderr=proc.stderr.decode("utf-8", "surrogateescape"),
+        stdout=stdout_data.decode("utf-8", "surrogateescape"),
+        stderr="".join(stderr_lines),
         command=cmd,
     )
 
@@ -296,10 +475,13 @@ def copy_title(
     target_title: str,
     options: RsyncOptions,
     partial_dir: str | None = None,
+    progress_cb: Callable[[dict], None] | None = None,
+    total_bytes_hint: int | None = None,
+    enable_progress: bool = True,
 ) -> CommandResult:
-    cmd = copy_title_command(source_title, target_title, options, partial_dir)
+    cmd = copy_title_command(source_title, target_title, options, partial_dir, progress=enable_progress and progress_cb is not None)
     LOG.debug("running: %s", _format_command(cmd))
-    return run_command(cmd, timeout=max(options.timeout + 60, 120))
+    return run_command(cmd, timeout=max(options.timeout + 60, 120), progress_cb=progress_cb, total_bytes_hint=total_bytes_hint)
 
 
 def copy_files(
@@ -309,12 +491,15 @@ def copy_files(
     options: RsyncOptions,
     backup_dir: str,
     partial_dir: str | None = None,
+    progress_cb: Callable[[dict], None] | None = None,
+    total_bytes_hint: int | None = None,
+    enable_progress: bool = True,
 ) -> CommandResult:
     cmd = copy_files_command(
-        source_title, target_title, options, backup_dir, partial_dir
+        source_title, target_title, options, backup_dir, partial_dir, progress=enable_progress and progress_cb is not None
     )
     payload = ("\0".join(rel_paths) + "\0").encode("utf-8", "surrogateescape")
     LOG.debug("running: %s", _format_command(cmd))
     return run_command(
-        cmd, input_data=payload, timeout=max(options.timeout + 60, 120)
+        cmd, input_data=payload, timeout=max(options.timeout + 60, 120), progress_cb=progress_cb, total_bytes_hint=total_bytes_hint
     )

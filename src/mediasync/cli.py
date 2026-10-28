@@ -25,6 +25,7 @@ from .planner import (
     supersede_pending,
 )
 from .policy import PolicySet, add_pattern, load_rules, remove_pattern
+from .prune import find_prune_candidates, prune_targets
 from .report import format_plan, format_trash, write_html
 from .safety import SafetyError, describe_mount, inspect_library
 from .state import State
@@ -656,6 +657,73 @@ def cmd_policy(args: argparse.Namespace) -> int:
     raise ConfigError(f"unknown policy action: {args.action}")
 
 
+def cmd_prune_blacklisted(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    library = _library(config, args.library)
+    with _lock(config):
+        with State(config.state_dir) as state:
+            active = state.active_run_progress(library.name)
+            if active:
+                raise ConfigError("apply/prune already running for this library")
+            policy = PolicySet.load(library.whitelist, library.blacklist)
+            candidates = find_prune_candidates(config, library, policy)
+            if not candidates:
+                print("No blacklisted titles found on target to prune.")
+                return EXIT_OK
+            protected = [c for c in candidates if c.protected]
+            movable = [c for c in candidates if not c.protected]
+            print(f"Candidates: {len(candidates)} ({len(movable)} movable, {len(protected)} protected by whitelist)")
+            for c in candidates:
+                print(f"  [{c.status}] {c.rel_path} ({'dir' if c.is_dir else 'file'}) {human_size(c.size)}")
+            if args.dry_run:
+                print("\nDry run - no changes made.")
+                return EXIT_OK
+            if protected and not args.force:
+                print("\nProtected items exist. Use --force and confirm to override whitelist protection.")
+                return EXIT_BLOCKED
+            if protected and args.force:
+                if args.yes:
+                    confirm = "PRUNE"
+                else:
+                    try:
+                        resp = input("Type PRUNE to confirm overriding whitelist protection: ")
+                    except Exception:
+                        resp = ""
+                    confirm = resp.strip()
+                if confirm != "PRUNE":
+                    print("Confirmation failed.")
+                    return EXIT_USAGE
+            if not args.yes and not args.dry_run:
+                try:
+                    resp = input(f"Move {len(movable) + (len(protected) if args.force else 0)} items to {'trash (permanent)' if args.permanent else 'trash'}? [y/N]: ")
+                except Exception:
+                    resp = ""
+                if resp.strip().lower() not in {"y", "yes"}:
+                    print("Cancelled.")
+                    return EXIT_OK
+            run_id = f"prune-{now_stamp()}-{uuid.uuid4().hex[:6]}"
+            result = prune_targets(
+                config,
+                state,
+                library,
+                candidates,
+                run_id,
+                permanent=args.permanent,
+                force=args.force,
+                progress=_progress,
+            )
+            print(f"Pruned: moved={result.moved} skipped_protected={result.skipped_protected} errors={len(result.errors)}")
+            if result.report_path:
+                print(f"Report: {result.report_path}")
+            if result.report_html_path:
+                print(f"HTML report: {result.report_html_path}")
+            if result.errors:
+                for err in result.errors:
+                    print(f"  ERROR {err}", file=sys.stderr)
+                return EXIT_APPLY
+            return EXIT_OK
+
+
 def cmd_trash(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     with State(config.state_dir) as state:
@@ -795,6 +863,16 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--allow-pending", action="store_true")
     apply.add_argument("--replan-if-stale", action="store_true")
     apply.set_defaults(func=cmd_apply)
+
+    prune = sub.add_parser("prune-blacklisted", help="prune target titles matching blacklist to trash")
+    prune.add_argument("--library", "-l", required=True)
+    prune.add_argument("--all-blacklisted", action="store_true", default=True)
+    prune.add_argument("--dry-run", action="store_true")
+    prune.add_argument("--yes", action="store_true")
+    prune.add_argument("--permanent", action="store_true")
+    prune.add_argument("--force", action="store_true")
+    prune.add_argument("--json", action="store_true")
+    prune.set_defaults(func=cmd_prune_blacklisted)
 
     status = sub.add_parser("status", help="show library, plan and trash status")
     status.add_argument("--library", "-l")

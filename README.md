@@ -208,11 +208,22 @@ Precedence is based on specificity (length plus 100 per slash). The most
 specific matching rule wins. If a whitelist and a blacklist rule have equal
 specificity, the blacklist wins.
 
-- **Whitelist**: keep existing target content and allow new source content to
-  be added. Updates, replacements, re-encodes and deletes of existing target
-  content are held automatically.
-- **Blacklist**: ignore the path entirely. Nothing is copied, updated or
-  deleted.
+### When to use Whitelist vs Blacklist
+
+- **Whitelist**: protects existing target content. Use when you want to keep something on the target even if it's removed from the source, or preserve manually curated files that don't exist in source. Updates, replacements, re-encodes and deletes of existing target content are held automatically.
+- **Blacklist**: ignores the path entirely. Use when you never want something synced at all. Nothing is copied, updated or deleted for blacklisted paths.
+
+#### Whitelist examples
+
+1. **Archived show removed from source** - A show (e.g. `The West Wing`) is deleted from your source share to save space, but you want to keep it on your NAS for archival. Add `The West Wing` to your whitelist - mediasync will never delete it from the target.
+2. **Manually curated extras** - You added director commentaries or custom subtitles to `Dune (2021)/Extras` on the target that don't exist on source. Add `Dune (2021)/Extras` to your whitelist so mediasync won't delete or modify them.
+
+#### Blacklist examples
+
+1. **Skip bonus content** - You never want `*/Extras` folders synced from source. Add `*/Extras` to your blacklist and mediasync will ignore them entirely.
+2. **Skip unwanted formats** - You don't want ISO rips synced. Add `*.iso` to your blacklist so they're never copied over, even if they exist on source.
+
+**Rule of thumb:** If you want to *preserve* something that exists on the target (especially if removed from source), use **whitelist**. If you want to *never sync* something from source, use **blacklist**.
 
 Manage rules with the CLI or GUI:
 
@@ -259,12 +270,17 @@ to run and exits with code 14. Create a new plan.
 15 3 * * * cd /Users/me/mediasync-config && /path/to/.venv/bin/mediasync run >> ~/.mediasync/cron.log 2>&1
 ```
 
-`run` scans, applies accepted changes, and writes a text report plus the plan
-HTML report. It refuses to apply when approval is required. For an unattended
-job that should still apply the safe subset:
+`mediasync run` is designed for unattended/cron use:
+
+- **It always creates a fresh plan.** `run` scans all enabled libraries and builds new plans (it does not require a pre-existing plan). If pending plans already exist for a library, `run` will skip that library unless `--force` is passed (which supersedes pending plans).
+- **Auto-approval is respected.** Changes listed in `[apply].auto_approve` are accepted automatically when planning/applying. Other changes remain pending.
+- **It applies what it can, stops for what it can't.** By default, if a plan has pending changes requiring approval or is blocked, `run` will *not* apply anything for that library and will exit with code `10` (approval required) or `11` (blocked). It still processes other libraries and writes a combined run report.
+- **Use `--apply-safe` to apply only auto-approved changes.** With `--apply-safe`, `run` will apply accepted/auto-approved changes even if the plan requires approval for other items. Pending/held items that aren't auto-approved are not applied; the run still reports and exits with `10` if approval would otherwise be required.
+- **Safety checks still apply.** Mount issues, source title drops, stale plans, locks, and blocking reasons (like exceeding `max_pending_deletions`/`max_delete_gb`) are enforced. Plans with scan errors cause exit code `4` for that library.
+- **Reports are always written.** Each `run` writes a text run report and, by default, HTML reports for each plan it creates.
 
 ```sh
-mediasync run --apply-safe
+mediasync run --apply-safe  # Apply only auto-approved changes, skip libraries that need manual approval
 ```
 
 ## Trash

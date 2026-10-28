@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 try:
@@ -20,12 +22,31 @@ from .config import Config, ConfigError
 from .models import Change, Decision, Plan
 from .planner import pending_plans, plan_library, save_plan, supersede_pending
 from .policy import PolicySet, add_pattern
+from .prune import find_prune_candidates, prune_targets
 from .report import ACTION_LABEL, ACTION_ORDER, DECISION_LABEL, plan_stats
 from .state import State
 from .trash import TrashError, list_trash, purge, restore
-from .util import FileLock, human_size, now_stamp
+from .util import FileLock, human_size, now_stamp, now_iso
 
 Progress = Callable[[str], None]
+
+
+def _find_icon() -> str | None:
+    candidates = []
+    here = Path(__file__).resolve()
+    candidates.append(here.parent / "resources" / "icon.png")
+    candidates.append(here.parent / "resources" / "icon.gif")
+    candidates.append(here.parent.parent / "assets" / "icon.png")
+    candidates.append(here.parent.parent / "assets" / "icon.gif")
+    candidates.append(Path.cwd() / "assets" / "icon.png")
+    candidates.append(Path.cwd() / "assets" / "icon.gif")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except Exception:
+            continue
+    return None
 
 
 def _lock(config: Config) -> FileLock:
@@ -87,11 +108,27 @@ class MediasyncGui:
         if self.current_library not in names:
             raise ConfigError(f"unknown or disabled library: {self.current_library}")
 
-        self.root.title("mediasync")
+        self.root.title("MediaSync")
         self.root.geometry("1280x780")
         self.root.minsize(960, 620)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self._icon_image = None
+        icon_path = _find_icon()
+        if icon_path and tk is not None:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, self._icon_image)
+            except Exception:
+                self._icon_image = None
+        try:
+            if sys.platform == "darwin":
+                self.root.createcommand("::tk::mac::Quit", self._close)
+                self.root.tk.call("tk", "appname", "MediaSync")
+        except Exception:
+            pass
         self._build(names)
+        self._build_menubar(names)
+        self._build_context_menu()
         self._refresh_library_state()
 
     def _build(self, names: list[str]) -> None:
@@ -121,16 +158,24 @@ class MediasyncGui:
         self.policy_button = ttk.Button(
             top, text="Test Policy", command=self._show_policy_tester
         )
+        self.prune_preview_button = ttk.Button(
+            top, text="Preview Prune", command=self._preview_prune
+        )
+        self.prune_button = ttk.Button(
+            top, text="Prune Blacklisted", command=self._prune_blacklisted
+        )
         for widget in (
             self.plan_button,
             self.pending_button,
             self.apply_button,
             self.trash_button,
             self.policy_button,
+            self.prune_preview_button,
+            self.prune_button,
         ):
             widget.pack(side="left", padx=3)
         self._busy_widgets.extend(
-            [self.plan_button, self.pending_button, self.apply_button]
+            [self.plan_button, self.pending_button, self.apply_button, self.prune_preview_button, self.prune_button]
         )
 
         summary = ttk.LabelFrame(outer, text="Plan summary", padding=8)
@@ -368,6 +413,101 @@ class MediasyncGui:
         if text:
             self.details.insert("1.0", text)
         self.details.configure(state="disabled")
+
+    def _about(self) -> None:
+        if messagebox is None:
+            return
+        try:
+            from . import __version__
+
+            version = __version__
+        except Exception:
+            version = "unknown"
+        messagebox.showinfo(
+            "About MediaSync",
+            f"MediaSync {version}\n\nMedia-aware one-way sync with approvals, policy files and quarantine.",
+        )
+
+    def _refresh_view(self) -> None:
+        self._refresh_library_state()
+
+    def _approve_all_pending(self) -> None:
+        self._decide_all(Decision.ACCEPTED.value)
+
+    def _deny_all_pending(self) -> None:
+        self._decide_all(Decision.DENIED.value)
+
+    def _decide_all(self, decision: str) -> None:
+        if self.busy or self.plan is None:
+            return
+        if any(change.applied for change in self.plan.changes):
+            messagebox.showinfo(
+                "Plan already applied",
+                "This plan has already been applied. Create a new plan to make more changes.",
+            )
+            return
+        pending = [
+            change
+            for change in self.plan.changes
+            if change.decision == Decision.PENDING.value
+        ]
+        if not pending:
+            messagebox.showinfo("Nothing pending", "No pending changes remain.")
+            return
+        verb = "approve" if decision == Decision.ACCEPTED.value else "deny"
+        if not messagebox.askyesno(
+            "Confirm",
+            f"{verb.capitalize()} all {len(pending)} pending change(s)?",
+        ):
+            return
+        for change in pending:
+            change.decision = decision
+            change.decision_reason = (
+                "approved in GUI (all)" if decision == Decision.ACCEPTED.value else "denied in GUI (all)"
+            )
+        if not any(change.decision == Decision.PENDING.value for change in self.plan.changes):
+            self.plan.blocking_reasons = []
+        self.plan.recompute_status()
+        save_plan(self.config, self.plan)
+        self._refresh_plan()
+        verb2 = "Approved" if decision == Decision.ACCEPTED.value else "Denied"
+        self.status_var.set(f"{verb2} all {len(pending)} pending change(s).")
+
+    def _copy_selected_path(self) -> None:
+        if tk is None or self.plan is None:
+            return
+        targets = self._selected_changes()
+        if not targets:
+            messagebox.showinfo("Copy", "Select one or more rows first.")
+            return
+        text = "\n".join(change.path for change in targets)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set(f"Copied {len(targets)} path(s) to clipboard.")
+        except Exception as exc:
+            self._show_error(exc)
+
+    def _copy_selected_title(self) -> None:
+        if tk is None or self.plan is None:
+            return
+        targets = self._selected_changes()
+        if not targets:
+            messagebox.showinfo("Copy", "Select one or more rows first.")
+            return
+        text = "\n".join(change.title for change in targets)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set(f"Copied {len(targets)} title(s) to clipboard.")
+        except Exception as exc:
+            self._show_error(exc)
+
+    def _show_details_focus(self) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self._on_select()
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -766,6 +906,163 @@ class MediasyncGui:
             return
         _PolicyTester(self.root, self.config, self.current_library)
 
+    def _preview_prune(self) -> None:
+        if self.busy:
+            return
+        try:
+            with State(self.config.state_dir) as state:
+                active = state.active_run_progress(self.current_library)
+                if active:
+                    messagebox.showerror("Busy", "An apply/prune is already running for this library.")
+                    return
+        except Exception:
+            pass
+        library = self._library()
+        policy = PolicySet.load(library.whitelist, library.blacklist)
+        candidates = find_prune_candidates(self.config, library, policy)
+        if not candidates:
+            messagebox.showinfo("Prune", "No blacklisted titles found on target to prune.")
+            return
+        _PrunePreviewDialog(self.root, self.config, library, candidates, self._prune_blacklisted_confirm)
+
+    def _prune_blacklisted(self) -> None:
+        self._preview_prune()
+
+    def _prune_blacklisted_confirm(self, candidates, force=False, permanent=False) -> None:
+        if self.busy:
+            return
+        protected = [c for c in candidates if c.protected]
+        if protected and not force:
+            messagebox.showwarning("Protected", "Some items are protected by whitelist. Use Preview and force with confirmation.")
+            return
+        if protected and force:
+            if not messagebox.askyesno("Override protection", "You are about to override whitelist protection. This is dangerous. Continue?"):
+                return
+            try:
+                resp = tk.simpledialog.askstring("Confirm", "Type PRUNE to confirm:", parent=self.root)
+            except Exception:
+                resp = None
+            if not resp or resp.strip() != "PRUNE":
+                messagebox.showerror("Cancelled", "Confirmation failed.")
+                return
+        if not messagebox.askyesno("Confirm prune", f"Move {len([c for c in candidates if not c.protected or force])} items to {'trash (permanent)' if permanent else 'trash'}?"):
+            return
+        import uuid
+        from .util import now_stamp
+        run_id = f"prune-{now_stamp()}-{uuid.uuid4().hex[:6]}"
+
+        def work(progress):
+            with _lock(self.config):
+                with State(self.config.state_dir) as state:
+                    return prune_targets(self.config, state, library, candidates, run_id, permanent=permanent, force=force, progress=progress)
+
+        def done(result):
+            msg = f"Pruned: moved={result.moved} skipped_protected={result.skipped_protected} errors={len(result.errors)}"
+            self.status_var.set(msg)
+            if result.report_path:
+                msg += f"\nReport: {result.report_path}"
+            messagebox.showinfo("Prune complete", msg)
+
+        self._run_async("Pruning blacklisted...", work, done)
+
+    def _build_menubar(self, names: list[str]) -> None:
+        if tk is None or not hasattr(self.root, "menu"):
+            pass
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        app_menu = tk.Menu(menubar, tearoff=0, name="apple")
+        menubar.add_cascade(label="MediaSync", menu=app_menu)
+        app_menu.add_command(label="About MediaSync", command=self._about)
+        app_menu.add_separator()
+        app_menu.add_command(label="Quit MediaSync", command=self._close)
+
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="New Plan", command=self._new_plan)
+        file_menu.add_command(label="Open Pending Plan...", command=self._open_pending)
+        file_menu.add_command(label="Apply Plan", command=self._apply)
+        file_menu.add_separator()
+        file_menu.add_command(label="Quit", command=self._close)
+
+        lib_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Library", menu=lib_menu)
+        for name in names:
+            lib_menu.add_command(label=name, command=lambda n=name: self._switch_library_menu(n))
+
+        plan_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Plan", menu=plan_menu)
+        plan_menu.add_command(label="Approve Selected", command=lambda: self._decide(Decision.ACCEPTED.value))
+        plan_menu.add_command(label="Deny Selected", command=lambda: self._decide(Decision.DENIED.value))
+        plan_menu.add_separator()
+        plan_menu.add_command(label="Approve All Pending", command=self._approve_all_pending)
+        plan_menu.add_command(label="Deny All Pending", command=self._deny_all_pending)
+
+        policy_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Policy", menu=policy_menu)
+        policy_menu.add_command(label="Test Policy...", command=self._show_policy_tester)
+        policy_menu.add_separator()
+        policy_menu.add_command(label="Add Selected to Whitelist", command=lambda: self._add_policy("whitelist"))
+        policy_menu.add_command(label="Add Selected to Blacklist", command=lambda: self._add_policy("blacklist"))
+
+        trash_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Trash", menu=trash_menu)
+        trash_menu.add_command(label="Open Trash...", command=self._show_trash)
+
+        view_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="View", menu=view_menu)
+        view_menu.add_command(label="Refresh Library Status", command=self._refresh_view)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About MediaSync", command=self._about)
+
+    def _switch_library_menu(self, name: str) -> None:
+        if self.busy:
+            return
+        if name == self.current_library:
+            return
+        self.library_var.set(name)
+        self._on_library_change()
+
+    def _build_context_menu(self) -> None:
+        if tk is None:
+            return
+        self._context_menu = tk.Menu(self.root, tearoff=0)
+        self._context_menu.add_command(label="Approve Selected", command=lambda: self._decide(Decision.ACCEPTED.value))
+        self._context_menu.add_command(label="Deny Selected", command=lambda: self._decide(Decision.DENIED.value))
+        self._context_menu.add_separator()
+        self._context_menu.add_command(label="Approve All Pending", command=self._approve_all_pending)
+        self._context_menu.add_command(label="Deny All Pending", command=self._deny_all_pending)
+        self._context_menu.add_separator()
+        self._context_menu.add_command(label="Add to Whitelist", command=lambda: self._add_policy("whitelist"))
+        self._context_menu.add_command(label="Add to Blacklist", command=lambda: self._add_policy("blacklist"))
+        self._context_menu.add_separator()
+        self._context_menu.add_command(label="Copy Path", command=self._copy_selected_path)
+        self._context_menu.add_command(label="Copy Title", command=self._copy_selected_title)
+        self._context_menu.add_command(label="Show Details", command=self._show_details_focus)
+
+        def _on_context(event: Any) -> None:
+            try:
+                iid = self.tree.identify_row(event.y)
+                if iid:
+                    if iid not in self.tree.selection():
+                        self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                self._context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    self._context_menu.grab_release()
+                except Exception:
+                    pass
+
+        self.tree.bind("<Button-2>", _on_context)
+        self.tree.bind("<Button-3>", _on_context)
+        try:
+            self.tree.bind("<Control-Button-1>", _on_context)
+        except Exception:
+            pass
+
     def _close(self) -> None:
         if self.busy:
             if not messagebox.askyesno(
@@ -785,6 +1082,13 @@ class _PlanPicker:
         self.top.title("Pending plans")
         self.top.geometry("720x320")
         self.top.transient(parent)
+        icon_path = _find_icon()
+        if icon_path:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.top.iconphoto(False, self._icon_image)
+            except Exception:
+                pass
         self.listbox = tk.Listbox(
             self.top,
             selectmode="browse",
@@ -832,6 +1136,13 @@ class _PolicyTester:
         self.top = tk.Toplevel(parent)
         self.top.title("Policy tester")
         self.top.geometry("760x420")
+        icon_path = _find_icon()
+        if icon_path:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.top.iconphoto(False, self._icon_image)
+            except Exception:
+                pass
         frame = ttk.Frame(self.top, padding=10)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="Library-relative path").pack(anchor="w")
@@ -876,6 +1187,51 @@ class _PolicyTester:
         self.result.configure(state="disabled")
 
 
+class _PrunePreviewDialog:
+    def __init__(self, parent: Any, config: Config, library, candidates, on_confirm):
+        self.candidates = candidates
+        self.on_confirm = on_confirm
+        self.library = library
+        self.top = tk.Toplevel(parent)
+        self.top.title("Prune Blacklisted Content - Preview")
+        self.top.geometry("820x420")
+        self.top.transient(parent)
+        frame = ttk.Frame(self.top, padding=10)
+        frame.pack(fill="both", expand=True)
+        movable = len([c for c in candidates if not c.protected])
+        protected = len([c for c in candidates if c.protected])
+        total_size = sum(c.size for c in candidates)
+        ttk.Label(frame, text=f"{len(candidates)} titles/dirs, {movable} movable, {protected} protected by whitelist, {human_size(total_size)} total").pack(anchor="w")
+        columns = ("path", "type", "size", "status", "reason")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings")
+        for col, txt in zip(columns, ["Path", "Type", "Size", "Status", "Reason"]):
+            self.tree.heading(col, text=txt)
+        self.tree.column("path", width=320)
+        self.tree.column("type", width=60)
+        self.tree.column("size", width=80)
+        self.tree.column("status", width=140)
+        self.tree.column("reason", width=200)
+        for c in candidates:
+            self.tree.insert("", "end", values=(c.rel_path, "dir" if c.is_dir else "file", human_size(c.size), c.status, c.reason))
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(fill="both", expand=True)
+        scroll.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        btns = ttk.Frame(self.top, padding=(10,0,10,10))
+        btns.pack(fill="x")
+        self.force_var = tk.BooleanVar(value=False)
+        self.perm_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(btns, text="Force override whitelist protection", variable=self.force_var).pack(side="left")
+        ttk.Checkbutton(btns, text="Delete permanently", variable=self.perm_var).pack(side="left", padx=8)
+        ttk.Button(btns, text="Cancel", command=self.top.destroy).pack(side="right")
+        ttk.Button(btns, text="Prune...", command=self._confirm).pack(side="right", padx=6)
+        self.top.grab_set()
+
+    def _confirm(self):
+        self.top.destroy()
+        self.on_confirm(self.candidates, force=self.force_var.get(), permanent=self.perm_var.get())
+
+
 class _TrashWindow:
     def __init__(self, parent: Any, config: Config) -> None:
         self.config = config
@@ -883,6 +1239,13 @@ class _TrashWindow:
         self.top = tk.Toplevel(parent)
         self.top.title("Trash")
         self.top.geometry("980x480")
+        icon_path = _find_icon()
+        if icon_path:
+            try:
+                self._icon_image = tk.PhotoImage(file=icon_path)
+                self.top.iconphoto(False, self._icon_image)
+            except Exception:
+                pass
         frame = ttk.Frame(self.top, padding=10)
         frame.pack(fill="both", expand=True)
         columns = ("id", "library", "size", "type", "deleted", "path")
@@ -1040,6 +1403,10 @@ def launch_gui(config: Config, library: str | None = None) -> int:
         root = tk.Tk()
     except tk.TclError as exc:
         raise ConfigError(f"unable to start the GUI: {exc}") from exc
+    try:
+        root.tk.call("wm", "iconname", root._w, "MediaSync")
+    except Exception:
+        pass
     MediasyncGui(root, config, library)
     root.mainloop()
     return 0

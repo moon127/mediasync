@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -275,11 +276,69 @@ def apply_plan(
     report(f"{library.name}: applying {len(accepted)} accepted change(s) ({files_total} items, {human_size(bytes_total)})")
     files_done = 0
     bytes_done = 0
+    last_progress_update = 0.0
+
+    def _update_overall_progress(current_msg: str) -> None:
+        nonlocal last_progress_update
+        now = time.monotonic()
+        if now - last_progress_update < 0.2:
+            return
+        last_progress_update = now
+        try:
+            state.update_run_progress(
+                run_id,
+                library=library.name,
+                plan_id=plan.plan_id,
+                files_total=files_total,
+                files_done=files_done,
+                bytes_total=bytes_total,
+                bytes_done=bytes_done,
+                current=current_msg,
+                status="running",
+                mode="apply",
+            )
+        except Exception:
+            pass
+
     for title, title_changes in sorted(by_title.items()):
         source_title = os.path.join(source_root, title)
         target_title = os.path.join(target_root, title)
         title_errors: list[str] = []
         applied_here = 0
+        title_bytes_total = sum(c.size for c in title_changes if c.size)
+        title_bytes_done = 0
+
+        def _title_progress(data: dict) -> None:
+            nonlocal title_bytes_done
+            transferred = data.get("transferred") if isinstance(data, dict) else None
+            if transferred is None:
+                return
+            try:
+                transferred_int = int(transferred)
+            except Exception:
+                return
+            if title_bytes_total > 0:
+                if transferred_int > title_bytes_done:
+                    title_bytes_done = transferred_int
+                overall_bytes = bytes_done + min(title_bytes_done, title_bytes_total)
+                pct = int((overall_bytes / bytes_total) * 100) if bytes_total else 0
+                percent = data.get("percent")
+                speed = data.get("speed")
+                eta = data.get("eta")
+                msg = f"{title}: transferring {percent}% {human_size(overall_bytes)}/{human_size(bytes_total)}"
+                if speed and eta and eta != "0":
+                    msg += f" {speed} ETA {eta}"
+                _update_overall_progress(msg)
+            else:
+                pct = int((files_done / files_total) * 100) if files_total else 0
+                percent = data.get("percent")
+                speed = data.get("speed")
+                eta = data.get("eta")
+                msg = f"{title}: transferring {percent}% ({files_done}/{files_total}, {pct}%)"
+                if speed and eta and eta != "0":
+                    msg += f" {speed} ETA {eta}"
+                _update_overall_progress(msg)
+
         try:
             title_errors, applied_here = _apply_title(
                 config,
@@ -294,6 +353,7 @@ def apply_plan(
                 options,
                 trash_base,
                 partial_dir,
+                progress_cb=_title_progress if (files_total or bytes_total) else None,
             )
         except Exception as exc:  # pragma: no cover - defensive
             title_errors = [f"{title}: {exc}"]
@@ -311,21 +371,7 @@ def apply_plan(
                 files_done += 1
                 bytes_done += c.size or 0
         pct = int((files_done / files_total) * 100) if files_total else 100
-        try:
-            state.update_run_progress(
-                run_id,
-                library=library.name,
-                plan_id=plan.plan_id,
-                files_total=files_total,
-                files_done=files_done,
-                bytes_total=bytes_total,
-                bytes_done=bytes_done,
-                current=f"{title}: {files_done}/{files_total} ({pct}%) {human_size(bytes_done)}/{human_size(bytes_total)}",
-                status="running",
-                mode="apply",
-            )
-        except Exception:
-            pass
+        _update_overall_progress(f"{title}: {files_done}/{files_total} ({pct}%) {human_size(bytes_done)}/{human_size(bytes_total)}")
         if applied_here:
             report(
                 f"{library.name}: applied {applied_here} change(s) in {title} "
@@ -402,6 +448,7 @@ def _apply_title(
     options,
     trash_base: str,
     partial_dir: str,
+    progress_cb=None,
 ) -> tuple[list[str], int]:
     errors: list[str] = []
     applied = 0
@@ -423,6 +470,13 @@ def _apply_title(
                         continue
                     ensure_dir(target_title)
                     backup_dir = os.path.join(trash_base, run_id, "backups", title)
+                    allowed_bytes = 0
+                    for p in allowed:
+                        try:
+                            sp = os.path.join(plan.source, title, p)
+                            allowed_bytes += os.path.getsize(sp)
+                        except Exception:
+                            pass
                     result = copy_files(
                         source_title,
                         target_title,
@@ -430,9 +484,19 @@ def _apply_title(
                         options,
                         backup_dir,
                         partial_dir,
+                        progress_cb=progress_cb,
+                        total_bytes_hint=allowed_bytes or None,
                     )
                 else:
-                    result = copy_title(source_title, target_title, options, partial_dir)
+                    title_bytes = sum(c.size for c in changes if c.size)
+                    result = copy_title(
+                        source_title,
+                        target_title,
+                        options,
+                        partial_dir,
+                        progress_cb=progress_cb,
+                        total_bytes_hint=title_bytes or None,
+                    )
                 if not result.ok:
                     errors.append(
                         f"{title}: copy failed: {result.stderr.strip() or result.returncode}"
@@ -456,7 +520,8 @@ def _apply_title(
                     continue
                 _mark_applied(state, run_id, library.name, change)
                 applied += 1
-            elif change.action == Action.DELETE_TITLE.value:
+                continue
+            if change.action == Action.DELETE_TITLE.value:
                 try:
                     quarantine(
                         config,
@@ -490,6 +555,7 @@ def _apply_title(
     if new_paths:
         backup_dir = os.path.join(trash_base, run_id, "backups", title)
         ensure_dir(backup_dir)
+        new_bytes = sum(c.size for c in new_changes if c.size)
         result = copy_files(
             source_title,
             target_title,
@@ -497,6 +563,8 @@ def _apply_title(
             options,
             backup_dir,
             partial_dir,
+            progress_cb=progress_cb,
+            total_bytes_hint=new_bytes or None,
         )
         if not result.ok:
             message = f"{title}: copy failed: {result.stderr.strip() or result.returncode}"
