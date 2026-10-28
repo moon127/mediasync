@@ -491,9 +491,6 @@ mediasync gui --library TV
 
 ## Screenshots
 
-> Add screenshots to `assets/screenshots/` to populate this section. Suggested filenames:
-> `gui-main.png`, `gui-plan-review.png`, `gui-policy-tester.png`, `gui-library-browser.png`, `gui-trash.png`, `gui-prune-preview.png`
-
 | Screenshot | Description |
 | --- | --- |
 | ![Main Window](assets/screenshots/gui-main.png) | Main GUI with library selection, plan controls, and status. |
@@ -501,4 +498,4 @@ mediasync gui --library TV
 | ![Policy Tester](assets/screenshots/gui-policy-tester.png) | Test whitelist/blacklist rules against library-relative paths. |
 | ![Library Browser](assets/screenshots/gui-library-browser.png) | Browse top-level titles from source/target and add to whitelist/blacklist. |
 | ![Trash Window](assets/screenshots/gui-trash.png) | Trash with library filtering and multi-select restore/purge. |
-| ![Prune Preview](assets/screenshots/gui-prune-preview.png) | Preview blacklisted content before pruning to trash. |
+| ![Prune Preview](assets/screenshots/gui-prune-review.png) | Preview blacklisted content before pruning to trash. |
