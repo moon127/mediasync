@@ -1249,7 +1249,7 @@ class _TrashWindow:
         frame = ttk.Frame(self.top, padding=10)
         frame.pack(fill="both", expand=True)
         columns = ("id", "library", "size", "type", "deleted", "path")
-        self.tree = ttk.Treeview(frame, columns=columns, show="headings")
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         headings = {
             "id": "ID",
             "library": "Library",
@@ -1276,8 +1276,9 @@ class _TrashWindow:
         buttons = ttk.Frame(self.top, padding=(10, 0, 10, 10))
         buttons.pack(fill="x")
         ttk.Button(buttons, text="Refresh", command=self._refresh).pack(side="left")
-        ttk.Button(buttons, text="Restore", command=self._restore).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Purge", command=self._purge).pack(side="left")
+        ttk.Button(buttons, text="Restore Selected", command=self._restore).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Purge Selected", command=self._purge).pack(side="left")
+        ttk.Button(buttons, text="Purge All", command=self._purge_all).pack(side="left", padx=6)
         ttk.Button(buttons, text="Close", command=self.top.destroy).pack(side="right")
         self._refresh()
 
@@ -1307,9 +1308,16 @@ class _TrashWindow:
     def _selected(self) -> dict[str, Any] | None:
         selection = self.tree.selection()
         if not selection:
-            messagebox.showinfo("Trash", "Select an entry first.")
             return None
         return self.entries.get(selection[0])
+
+    def _selected_entries(self) -> list[dict[str, Any]]:
+        entries = []
+        for iid in self.tree.selection():
+            entry = self.entries.get(iid)
+            if entry is not None:
+                entries.append(entry)
+        return entries
 
     def _library(self, entry: dict[str, Any]):
         try:
@@ -1321,76 +1329,221 @@ class _TrashWindow:
             return None
 
     def _restore(self) -> None:
-        entry = self._selected()
-        if entry is None:
+        entries = self._selected_entries()
+        if not entries:
+            messagebox.showinfo("Trash", "Select one or more entries first.")
             return
-        library = self._library(entry)
-        if library is None:
-            return
+        if len(entries) == 1:
+            entry = entries[0]
+            library = self._library(entry)
+            if library is None:
+                return
+            if not messagebox.askyesno(
+                "Restore", f"Restore {entry['original_path']}?"
+            ):
+                return
+            overwrite = False
+            while True:
+                try:
+                    with State(self.config.state_dir) as state:
+                        path = restore(
+                            self.config,
+                            library,
+                            state,
+                            int(entry["id"]),
+                            overwrite=overwrite,
+                        )
+                except TrashError as exc:
+                    if "already exists" in str(exc) and not overwrite:
+                        if messagebox.askyesno(
+                            "Restore",
+                            f"{entry['original_path']} already exists. "
+                            "Quarantine the existing path and restore this entry?",
+                        ):
+                            overwrite = True
+                            continue
+                    messagebox.showerror("Restore failed", str(exc))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showerror("Restore failed", str(exc))
+                    return
+                messagebox.showinfo("Restored", f"Restored to {path}")
+                self._refresh()
+                return
+
         if not messagebox.askyesno(
-            "Restore", f"Restore {entry['original_path']}?"
+            "Restore", f"Restore {len(entries)} selected entr{'y' if len(entries) == 1 else 'ies'}?"
         ):
             return
-        overwrite = False
-        while True:
+        restored = 0
+        errors = []
+        for entry in entries:
+            library = self._library(entry)
+            if library is None:
+                errors.append(f"{entry['original_path']}: library not configured")
+                continue
+            overwrite = False
+            ok = False
+            while not ok:
+                try:
+                    with State(self.config.state_dir) as state:
+                        restore(
+                            self.config,
+                            library,
+                            state,
+                            int(entry["id"]),
+                            overwrite=overwrite,
+                        )
+                    restored += 1
+                    ok = True
+                except TrashError as exc:
+                    if "already exists" in str(exc) and not overwrite:
+                        if not messagebox.askyesno(
+                            "Restore",
+                            f"{entry['original_path']} already exists. "
+                            "Quarantine the existing path and restore this entry?",
+                        ):
+                            errors.append(f"{entry['original_path']}: skipped")
+                            break
+                        overwrite = True
+                        continue
+                    errors.append(f"{entry['original_path']}: {exc}")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{entry['original_path']}: {exc}")
+                    break
+        if errors:
+            messagebox.showwarning(
+                "Restored with errors",
+                f"Restored {restored}/{len(entries)}.\n\n" + "\n".join(errors[:10]),
+            )
+        else:
+            messagebox.showinfo("Restored", f"Restored {restored} entr{'y' if restored == 1 else 'ies'}.")
+        self._refresh()
+
+    def _purge(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            messagebox.showinfo("Trash", "Select one or more entries first, or use Purge All.")
+            return
+        if len(entries) == 1:
+            entry = entries[0]
+            library = self._library(entry)
+            if library is None:
+                return
+            if not messagebox.askyesno(
+                "Purge permanently",
+                f"Permanently delete {entry['original_path']}?\n\n"
+                "This cannot be undone.",
+            ):
+                return
             try:
                 with State(self.config.state_dir) as state:
-                    path = restore(
+                    result = purge(
                         self.config,
                         library,
                         state,
-                        int(entry["id"]),
-                        overwrite=overwrite,
+                        trash_id=int(entry["id"]),
+                        all_entries=False,
                     )
-            except TrashError as exc:
-                if "already exists" in str(exc) and not overwrite:
-                    if messagebox.askyesno(
-                        "Restore",
-                        f"{entry['original_path']} already exists. "
-                        "Quarantine the existing path and restore this entry?",
-                    ):
-                        overwrite = True
-                        continue
-                messagebox.showerror("Restore failed", str(exc))
-                return
             except Exception as exc:  # noqa: BLE001
-                messagebox.showerror("Restore failed", str(exc))
+                messagebox.showerror("Purge failed", str(exc))
                 return
-            messagebox.showinfo("Restored", f"Restored to {path}")
+            messagebox.showinfo(
+                "Purged",
+                f"Removed {result['removed']} entr"
+                f"{'y' if result['removed'] == 1 else 'ies'}, "
+                f"{human_size(result['bytes'])}.",
+            )
             self._refresh()
             return
 
-    def _purge(self) -> None:
-        entry = self._selected()
-        if entry is None:
-            return
-        library = self._library(entry)
-        if library is None:
-            return
+        total_bytes = sum(int(e.get("size") or 0) for e in entries)
         if not messagebox.askyesno(
             "Purge permanently",
-            f"Permanently delete {entry['original_path']}?\n\n"
-            "This cannot be undone.",
+            f"Permanently delete {len(entries)} selected entr{'y' if len(entries) == 1 else 'ies'} "
+            f"({human_size(total_bytes)})?\n\nThis cannot be undone.",
         ):
             return
-        try:
-            with State(self.config.state_dir) as state:
-                result = purge(
-                    self.config,
-                    library,
-                    state,
-                    trash_id=int(entry["id"]),
-                    all_entries=False,
-                )
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Purge failed", str(exc))
+        removed = 0
+        bytes_removed = 0
+        errors = []
+        for entry in entries:
+            library = self._library(entry)
+            if library is None:
+                errors.append(f"{entry['original_path']}: library not configured")
+                continue
+            try:
+                with State(self.config.state_dir) as state:
+                    result = purge(
+                        self.config,
+                        library,
+                        state,
+                        trash_id=int(entry["id"]),
+                        all_entries=False,
+                    )
+                removed += int(result.get("removed") or 0)
+                bytes_removed += int(result.get("bytes") or 0)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{entry['original_path']}: {exc}")
+        if errors:
+            messagebox.showwarning(
+                "Purged with errors",
+                f"Removed {removed} entr{'y' if removed == 1 else 'ies'} ({human_size(bytes_removed)}).\n\n"
+                + "\n".join(errors[:10]),
+            )
+        else:
+            messagebox.showinfo(
+                "Purged",
+                f"Removed {removed} entr{'y' if removed == 1 else 'ies'}, {human_size(bytes_removed)}.",
+            )
+        self._refresh()
+
+    def _purge_all(self) -> None:
+        with State(self.config.state_dir) as state:
+            entries = list_trash(state)
+        if not entries:
+            messagebox.showinfo("Trash", "Trash is empty.")
             return
-        messagebox.showinfo(
-            "Purged",
-            f"Removed {result['removed']} entr"
-            f"{'y' if result['removed'] == 1 else 'ies'}, "
-            f"{human_size(result['bytes'])}.",
-        )
+        total_bytes = sum(int(e.get("size") or 0) for e in entries)
+        if not messagebox.askyesno(
+            "Purge all permanently",
+            f"Permanently delete ALL {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
+            f"({human_size(total_bytes)})?\n\nThis cannot be undone.",
+        ):
+            return
+        removed = 0
+        bytes_removed = 0
+        errors = []
+        for entry in entries:
+            library = self._library(entry)
+            if library is None:
+                errors.append(f"{entry['original_path']}: library not configured")
+                continue
+            try:
+                with State(self.config.state_dir) as state:
+                    result = purge(
+                        self.config,
+                        library,
+                        state,
+                        trash_id=int(entry["id"]),
+                        all_entries=False,
+                    )
+                removed += int(result.get("removed") or 0)
+                bytes_removed += int(result.get("bytes") or 0)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{entry['original_path']}: {exc}")
+        if errors:
+            messagebox.showwarning(
+                "Purged with errors",
+                f"Removed {removed}/{len(entries)} entr{'y' if removed == 1 else 'ies'} ({human_size(bytes_removed)}).\n\n"
+                + "\n".join(errors[:10]),
+            )
+        else:
+            messagebox.showinfo(
+                "Purged all",
+                f"Removed {removed} entr{'y' if removed == 1 else 'ies'}, {human_size(bytes_removed)}.",
+            )
         self._refresh()
 
 

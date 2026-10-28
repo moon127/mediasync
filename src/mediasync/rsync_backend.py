@@ -327,6 +327,12 @@ def scan_title(
 _PROGRESS_RE = re.compile(
     r"(?P<transferred>[\d,]+)\s+(?P<percent>\d+)%\s+(?P<speed>[^\s]+)\s+(?P<eta>[^\s]+)"
 )
+_PROGRESS2_RE = re.compile(
+    r"^\s*(?P<transferred>[\d,]+)\s+(?P<percent>\d+)%\s+(?P<speed>[^\s\/]+)\s+(?P<eta>[^\s]+)"
+)
+_PROGRESS2_ALT = re.compile(
+    r"(?P<transferred>[\d,]+)\s+(?P<percent>\d+)%\s+(?P<speed>[0-9\.]+[KMG]?[B]?/?[sS]?)\s+(?P<eta>(?:[\d:]+|[\d\.]+[smh]?|unknown|-))"
+)
 
 
 def _parse_progress_line(line: str) -> dict | None:
@@ -335,26 +341,46 @@ def _parse_progress_line(line: str) -> dict | None:
     line = line.strip()
     if not line:
         return None
-    match = _PROGRESS_RE.search(line)
-    if not match:
-        return None
-    try:
-        transferred = int(match.group("transferred").replace(",", ""))
-    except Exception:
-        transferred = 0
-    try:
-        percent = int(match.group("percent"))
-    except Exception:
-        percent = 0
-    speed = match.group("speed")
-    eta = match.group("eta")
-    return {
-        "transferred": transferred,
-        "percent": percent,
-        "speed": speed,
-        "eta": eta,
-        "raw": line,
-    }
+    for pattern in (_PROGRESS2_RE, _PROGRESS2_ALT, _PROGRESS_RE):
+        match = pattern.match(line) or pattern.search(line)
+        if match:
+            try:
+                transferred = int(match.group("transferred").replace(",", ""))
+            except Exception:
+                transferred = 0
+            try:
+                percent = int(match.group("percent"))
+            except Exception:
+                percent = 0
+            speed = match.group("speed")
+            eta = match.group("eta")
+            return {
+                "transferred": transferred,
+                "percent": percent,
+                "speed": speed,
+                "eta": eta,
+                "raw": line,
+            }
+    # Try to catch lines with just numbers/percent
+    if re.search(r"\d+%", line):
+        m = re.search(r"([0-9,]+).*?(\d+)%.*?([0-9\.]+[KMG]?[B]/s).*?(eta\s+)?([0-9:]+|[0-9\.]+[smh]|unknown|-)", line)
+        if m:
+            try:
+                transferred = int(m.group(1).replace(",", ""))
+            except Exception:
+                transferred = 0
+            try:
+                percent = int(m.group(2))
+            except Exception:
+                percent = 0
+            return {
+                "transferred": transferred,
+                "percent": percent,
+                "speed": m.group(3),
+                "eta": m.group(5),
+                "raw": line,
+            }
+    return None
 
 
 def run_command(
@@ -423,22 +449,54 @@ def run_command(
 
         # Read stderr for progress (rsync outputs progress there)
         if proc.stderr is not None:
-            for line in proc.stderr:
-                try:
-                    text = line.decode("utf-8", "surrogateescape")
-                except Exception:
-                    continue
-                stderr_lines.append(text)
-                parsed = _parse_progress_line(text)
-                if parsed:
-                    if total_bytes_hint and parsed.get("transferred"):
-                        try:
-                            transferred = int(parsed["transferred"])
-                            if total_bytes_hint > 0:
-                                parsed["percent"] = min(100, int((transferred / total_bytes_hint) * 100))
-                        except Exception:
-                            pass
-                    _emit(parsed)
+            buffer = ""
+            try:
+                while True:
+                    chunk = proc.stderr.read(1024)
+                    if not chunk:
+                        break
+                    try:
+                        text = chunk.decode("utf-8", "surrogateescape")
+                    except Exception:
+                        continue
+                    buffer += text
+                    while True:
+                        if "\r\n" in buffer:
+                            line, buffer = buffer.split("\r\n", 1)
+                            sep = "\r\n"
+                        elif "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            sep = "\n"
+                        elif "\r" in buffer:
+                            line, buffer = buffer.split("\r", 1)
+                            sep = "\r"
+                        else:
+                            break
+                        stderr_lines.append(line + sep)
+                        parsed = _parse_progress_line(line)
+                        if parsed:
+                            if total_bytes_hint and parsed.get("transferred"):
+                                try:
+                                    transferred = int(parsed["transferred"])
+                                    if total_bytes_hint > 0:
+                                        parsed["percent"] = min(100, int((transferred / total_bytes_hint) * 100))
+                                except Exception:
+                                    pass
+                            _emit(parsed)
+                    # Also try to parse if it's a progress line without line ending
+                    parsed = _parse_progress_line(buffer)
+                    if parsed and ("\r" in text or "--info=progress2" in " ".join(cmd)):
+                        # might be updating in place
+                        if total_bytes_hint and parsed.get("transferred"):
+                            try:
+                                transferred = int(parsed["transferred"])
+                                if total_bytes_hint > 0:
+                                    parsed["percent"] = min(100, int((transferred / total_bytes_hint) * 100))
+                            except Exception:
+                                pass
+                        _emit(parsed)
+            except Exception:
+                pass
     except Exception:
         pass
 
