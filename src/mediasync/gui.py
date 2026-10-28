@@ -23,7 +23,7 @@ from .apply import apply_plan
 from .config import Config, ConfigError
 from .models import Change, Decision, LibraryConfig, Plan
 from .planner import pending_plans, plan_library, save_plan, supersede_pending
-from .policy import PolicySet, add_pattern
+from .policy import PolicySet, add_pattern, remove_pattern
 from .prune import find_prune_candidates, prune_targets
 from .report import ACTION_LABEL, ACTION_ORDER, DECISION_LABEL, plan_stats
 from .state import State
@@ -1098,7 +1098,7 @@ class MediasyncGui:
             return
         if tk is None or messagebox is None:
             return
-        BlacklistBrowser(self.root, self.config, self.current_library)
+        BlacklistPolicyBrowser(self.root, self.config, self.current_library)
 
     def _build_menubar(self, names: list[str]) -> None:
         if tk is None or not hasattr(self.root, "menu"):
@@ -1138,7 +1138,7 @@ class MediasyncGui:
         policy_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Policy", menu=policy_menu)
         policy_menu.add_command(label="Browse Titles...", command=self._browse_library)
-        policy_menu.add_command(label="Browse Blacklisted Items...", command=self._browse_blacklist)
+        policy_menu.add_command(label="Manage Blacklist Rules...", command=self._browse_blacklist)
         policy_menu.add_command(label="Test Policy...", command=self._show_policy_tester)
         policy_menu.add_separator()
         policy_menu.add_command(label="Add Selected to Whitelist", command=lambda: self._add_policy("whitelist"))
@@ -1805,6 +1805,47 @@ def check_source_exists(library_source: str, rel_path: str) -> bool | None:
         return None
 
 
+def get_blacklist_rules_with_matches(config: Config, library: LibraryConfig) -> list[dict[str, Any]]:
+    try:
+        policy = PolicySet.load(library.whitelist, library.blacklist)
+    except Exception:
+        policy = PolicySet([], [])
+    source_titles: set[str] = set()
+    target_titles: set[str] = set()
+    try:
+        if os.path.isdir(library.source):
+            source_titles = set(list_visible_titles(library.source))
+    except Exception:
+        pass
+    try:
+        if os.path.isdir(library.target):
+            target_titles = set(list_visible_titles(library.target))
+    except Exception:
+        pass
+    rules_info: list[dict[str, Any]] = []
+    for rule in getattr(policy, "blacklist", []):
+        try:
+            src_matches = [t for t in source_titles if rule.matches(t)]
+        except Exception:
+            src_matches = []
+        try:
+            tgt_matches = [t for t in target_titles if rule.matches(t)]
+        except Exception:
+            tgt_matches = []
+        rules_info.append(
+            {
+                "rule": rule,
+                "raw": rule.raw,
+                "kind": rule.kind,
+                "src_matches": src_matches,
+                "tgt_matches": tgt_matches,
+                "src_count": len(src_matches),
+                "tgt_count": len(tgt_matches),
+            }
+        )
+    return rules_info
+
+
 def get_blacklisted_items_with_status(
     config: Config,
     library: LibraryConfig,
@@ -1865,7 +1906,7 @@ def launch_gui(config: Config, library: str | None = None) -> int:
     return 0
 
 
-class BlacklistBrowser:
+class BlacklistPolicyBrowser:
     def __init__(self, parent: Any, config: Config, library_name: str) -> None:
         self.config = config
         self.library_name = library_name
@@ -1873,18 +1914,11 @@ class BlacklistBrowser:
             self.library = config.library(library_name)
         except Exception:
             self.library = None
-        self.policy = None
-        if self.library is not None:
-            try:
-                self.policy = PolicySet.load(self.library.whitelist, self.library.blacklist)
-            except Exception:
-                self.policy = PolicySet([], [])
-        self.items: list[dict[str, Any]] = []
-        self.candidates = []
+        self.rules_info: list[dict[str, Any]] = []
         self.top = tk.Toplevel(parent)
-        self.top.title(f"Browse Blacklisted Items - {library_name}")
-        self.top.geometry("1080x620")
-        self.top.minsize(880, 520)
+        self.top.title(f"Manage Blacklist Rules - {library_name}")
+        self.top.geometry("980x560")
+        self.top.minsize(820, 480)
         self.top.transient(parent)
         self.top.grab_set()
         icon_path = _find_icon()
@@ -1902,22 +1936,19 @@ class BlacklistBrowser:
 
         frame = ttk.Frame(self.top, padding=(10, 0, 10, 10))
         frame.pack(fill="both", expand=True)
-        columns = ("item", "type", "pattern", "pattern_type", "exists_source", "protected", "size", "status")
+        columns = ("pattern", "type", "src", "tgt", "status")
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         headings = {
-            "item": "Item",
+            "pattern": "Pattern",
             "type": "Type",
-            "pattern": "Matched Pattern",
-            "pattern_type": "Pattern Type",
-            "exists_source": "Exists at Source",
-            "protected": "Protected",
-            "size": "Size",
+            "src": "Matches Source",
+            "tgt": "Matches Target",
             "status": "Status",
         }
-        widths = {"item": 320, "type": 60, "pattern": 280, "pattern_type": 90, "exists_source": 110, "protected": 80, "size": 80, "status": 100}
+        widths = {"pattern": 420, "type": 90, "src": 140, "tgt": 140, "status": 200}
         for col in columns:
             self.tree.heading(col, text=headings[col])
-            self.tree.column(col, width=widths[col], stretch=col in {"item", "pattern"})
+            self.tree.column(col, width=widths[col], stretch=col in {"pattern", "status"})
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -1930,8 +1961,7 @@ class BlacklistBrowser:
 
         buttons = ttk.Frame(self.top, padding=(10, 0, 10, 10))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Prune Selected", command=self._prune_selected).pack(side="left")
-        ttk.Button(buttons, text="Prune All Movable", command=self._prune_all_movable).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Remove Selected from Blacklist", command=self._remove_selected).pack(side="left")
         ttk.Button(buttons, text="Close", command=self.top.destroy).pack(side="right")
 
         self._refresh()
@@ -1939,114 +1969,84 @@ class BlacklistBrowser:
     def _refresh(self) -> None:
         for iid in self.tree.get_children():
             self.tree.delete(iid)
-        self.items = []
-        self.candidates = []
+        self.rules_info = []
         if self.library is None:
             self.info_var.set("Library not found.")
             return
         try:
-            self.items = get_blacklisted_items_with_status(self.config, self.library, self.policy)
+            self.rules_info = get_blacklist_rules_with_matches(self.config, self.library)
         except Exception:
-            self.items = []
-        total = len(self.items)
-        movable = 0
-        protected = 0
-        missing = 0
-        for idx, item in enumerate(self.items):
-            cand = item["candidate"]
-            self.candidates.append(cand)
-            if item["protected"] == "Yes":
-                protected += 1
+            self.rules_info = []
+        total = len(self.rules_info)
+        for idx, info in enumerate(self.rules_info):
+            rule = info["rule"]
+            src_count = info["src_count"]
+            tgt_count = info["tgt_count"]
+            total_matches = src_count + tgt_count
+            if total_matches == 0:
+                status = "Stale - no matches"
             else:
-                movable += 1
-            if item["exists_at_source"] == "No":
-                missing += 1
+                status = f"Active - blocks {total_matches} item(s)"
+            src_str = f"{src_count} match{'es' if src_count != 1 else ''}" if src_count else "None"
+            tgt_str = f"{tgt_count} match{'es' if tgt_count != 1 else ''}" if tgt_count else "None"
             self.tree.insert(
                 "",
                 "end",
                 iid=str(idx),
-                values=(
-                    item["rel_path"],
-                    item["type"],
-                    item["pattern"],
-                    item["pattern_type"],
-                    item["exists_at_source"],
-                    item["protected"],
-                    item["size"],
-                    item["status"],
-                ),
+                values=(info["raw"], rule.kind, src_str, tgt_str, status),
             )
-        self.info_var.set(
-            f"Total: {total} | Movable: {movable} | Protected: {protected} | Missing at Source: {missing}"
-        )
+        if not self.library.blacklist:
+            self.info_var.set(f"Rules: {total} | No blacklist file configured for this library")
+        else:
+            self.info_var.set(f"Rules: {total} | Blacklist: {self.library.blacklist}")
 
-    def _selected_candidates(self) -> list[Any]:
+    def _selected_rules(self) -> list[Any]:
         selected = []
         for iid in self.tree.selection():
             try:
                 idx = int(iid)
-                if idx < len(self.candidates):
-                    selected.append(self.candidates[idx])
+                if idx < len(self.rules_info):
+                    selected.append(self.rules_info[idx])
             except Exception:
                 continue
         return selected
 
-    def _prune_selected(self) -> None:
+    def _remove_selected(self) -> None:
         if self.library is None or tk is None:
             return
-        cands = self._selected_candidates()
-        if not cands:
-            messagebox.showinfo("Prune", "Select one or more blacklisted items to prune.")
+        if not self.library.blacklist:
+            messagebox.showerror("No blacklist file", "No blacklist file is configured for this library.")
             return
-        self._do_prune(cands)
-
-    def _prune_all_movable(self) -> None:
-        if self.library is None or tk is None:
+        rules = self._selected_rules()
+        if not rules:
+            messagebox.showinfo("Remove", "Select one or more rules to remove from the blacklist.")
             return
-        movable = [c for c in self.candidates if not c.protected]
-        if not movable:
-            messagebox.showinfo("Prune", "No movable (non-protected) items found.")
-            return
-        self._do_prune(movable)
-
-    def _do_prune(self, candidates) -> None:
-        if self.library is None or tk is None:
-            return
-        protected = [c for c in candidates if getattr(c, "protected", False)]
-        force = False
-        permanent = bool(getattr(self.config, "delete_mode", "trash") == "permanent")
-        if protected:
-            if not messagebox.askyesno(
-                "Protected items",
-                "Some selected items are protected by whitelist. Override protection with force?",
-            ):
-                return
-            force = True
-            try:
-                if simpledialog:
-                    resp = simpledialog.askstring("Confirm", "Type PRUNE to confirm:", parent=self.top)
-                    if not resp or resp.strip() != "PRUNE":
-                        messagebox.showerror("Cancelled", "Confirmation failed.")
-                        return
-            except Exception:
-                if not messagebox.askyesno("Confirm", "Type PRUNE was not confirmed. Continue anyway?"):
-                    return
+        patterns = [r["raw"] for r in rules]
+        preview = "\n".join(patterns[:10])
+        if len(patterns) > 10:
+            preview += f"\n... and {len(patterns) - 10} more"
         if not messagebox.askyesno(
-            "Confirm prune",
-            f"Move {len(candidates)} item(s) to {'trash (permanent)' if permanent else 'trash'}?",
+            "Remove from blacklist",
+            f"Remove {len(patterns)} rule(s) from the blacklist file?\n\n{preview}\n\nFile: {self.library.blacklist}\n\nThis only removes the lines from the policy file; it does not delete any actual files.",
         ):
             return
-        try:
-            result = run_prune_action(self.config, self.library, candidates, force=force, permanent=permanent)
-        except Exception as exc:
-            messagebox.showerror("Prune failed", str(exc))
-            self._refresh()
-            return
-        msg = f"Pruned: moved={result.moved} skipped_protected={result.skipped_protected} errors={len(result.errors)}"
-        if result.errors:
-            messagebox.showwarning("Prune completed with errors", msg + "\n\n" + "\n".join(result.errors[:10]))
+        removed = 0
+        errors = []
+        for pattern in patterns:
+            try:
+                if remove_pattern(self.library.blacklist, pattern):
+                    removed += 1
+                else:
+                    errors.append(f"{pattern}: not found")
+            except Exception as exc:
+                errors.append(f"{pattern}: {exc}")
+        if errors:
+            messagebox.showwarning(
+                "Removal completed with issues",
+                f"Removed {removed}/{len(patterns)} rule(s).\n\n" + "\n".join(errors[:10]),
+            )
         else:
-            messagebox.showinfo("Prune complete", msg)
+            messagebox.showinfo("Removed", f"Removed {removed} rule(s) from {self.library.blacklist}")
         self._refresh()
 
 
