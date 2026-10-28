@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - depends on the Python build
 from . import rsync_backend
 from .apply import apply_plan
 from .config import Config, ConfigError
-from .models import Change, Decision, Plan
+from .models import Change, Decision, LibraryConfig, Plan
 from .planner import pending_plans, plan_library, save_plan, supersede_pending
 from .policy import PolicySet, add_pattern
 from .prune import find_prune_candidates, prune_targets
@@ -1098,7 +1098,7 @@ class MediasyncGui:
             return
         if tk is None or messagebox is None:
             return
-        _BlacklistBrowser(self.root, self.config, self.current_library)
+        BlacklistBrowser(self.root, self.config, self.current_library)
 
     def _build_menubar(self, names: list[str]) -> None:
         if tk is None or not hasattr(self.root, "menu"):
