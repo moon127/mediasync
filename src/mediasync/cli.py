@@ -660,16 +660,16 @@ def cmd_policy(args: argparse.Namespace) -> int:
 def cmd_prune_blacklisted(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     library = _library(config, args.library)
-        with _lock(config):
-            with State(config.state_dir) as state:
-                try:
-                    state.clear_stale_runs(max_age_minutes=60)
-                except Exception:
-                    pass
-                active = state.active_run_progress(library.name)
-                if active:
-                    raise ConfigError("apply/prune already running for this library")
-                policy = PolicySet.load(library.whitelist, library.blacklist)
+    with _lock(config):
+        with State(config.state_dir) as state:
+            try:
+                state.clear_stale_runs(max_age_minutes=60)
+            except Exception:
+                pass
+            active = state.active_run_progress(library.name)
+            if active:
+                raise ConfigError("apply/prune already running for this library")
+            policy = PolicySet.load(library.whitelist, library.blacklist)
             candidates = find_prune_candidates(config, library, policy)
             if not candidates:
                 print("No blacklisted titles found on target to prune.")
