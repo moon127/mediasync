@@ -897,9 +897,9 @@ class MediasyncGui:
         self._run_async(f"Applying {library.name}...", work, done)
 
     def _show_trash(self) -> None:
-        if self.busy:
+        if tk is None or messagebox is None:
             return
-        _TrashWindow(self.root, self.config)
+        _TrashWindow(self.root, self.config, library=self.current_library)
 
     def _show_policy_tester(self) -> None:
         if self.busy:
@@ -1233,8 +1233,9 @@ class _PrunePreviewDialog:
 
 
 class _TrashWindow:
-    def __init__(self, parent: Any, config: Config) -> None:
+    def __init__(self, parent: Any, config: Config, library: str | None = None) -> None:
         self.config = config
+        self.default_library = library
         self.entries: dict[str, dict[str, Any]] = {}
         self.top = tk.Toplevel(parent)
         self.top.title("Trash")
@@ -1248,6 +1249,16 @@ class _TrashWindow:
                 pass
         frame = ttk.Frame(self.top, padding=10)
         frame.pack(fill="both", expand=True)
+        filter_frame = ttk.Frame(frame)
+        filter_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(filter_frame, text="Library:").pack(side="left")
+        lib_names = ["All libraries"] + [lib.name for lib in config.enabled_libraries()]
+        self.library_var = tk.StringVar(value=self.default_library or "All libraries")
+        if self.library_var.get() not in lib_names:
+            self.library_var.set("All libraries")
+        self.library_combo = ttk.Combobox(filter_frame, textvariable=self.library_var, values=lib_names, state="readonly", width=28)
+        self.library_combo.pack(side="left", padx=6)
+        self.library_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh())
         columns = ("id", "library", "size", "type", "deleted", "path")
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         headings = {
@@ -1286,11 +1297,17 @@ class _TrashWindow:
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self.entries.clear()
+        lib_filter = self.library_var.get()
+        if lib_filter == "All libraries":
+            lib_filter = None
         with State(self.config.state_dir) as state:
-            entries = list_trash(state)
+            entries = list_trash(state, lib_filter)
         for index, entry in enumerate(entries):
             iid = f"trash-{index}"
             self.entries[iid] = entry
+            deleted = entry.get("deleted_at") or ""
+            if len(deleted) >= 19:
+                deleted = deleted[:19]
             self.tree.insert(
                 "",
                 "end",
@@ -1300,7 +1317,7 @@ class _TrashWindow:
                     entry["library"],
                     human_size(entry["size"]),
                     entry["entry_type"],
-                    entry["deleted_at"][:19],
+                    deleted,
                     entry["original_path"],
                 ),
             )
@@ -1500,16 +1517,19 @@ class _TrashWindow:
         self._refresh()
 
     def _purge_all(self) -> None:
+        lib_filter = self.library_var.get()
+        if lib_filter == "All libraries":
+            lib_filter = None
         with State(self.config.state_dir) as state:
-            entries = list_trash(state)
+            entries = list_trash(state, lib_filter)
         if not entries:
             messagebox.showinfo("Trash", "Trash is empty.")
             return
         total_bytes = sum(int(e.get("size") or 0) for e in entries)
+        scope = f"all entr{'y' if len(entries) == 1 else 'ies'} in {lib_filter}" if lib_filter else f"ALL {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}"
         if not messagebox.askyesno(
             "Purge all permanently",
-            f"Permanently delete ALL {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
-            f"({human_size(total_bytes)})?\n\nThis cannot be undone.",
+            f"Permanently delete {scope} ({human_size(total_bytes)})?\n\nThis cannot be undone.",
         ):
             return
         removed = 0
