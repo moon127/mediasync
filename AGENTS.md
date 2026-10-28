@@ -108,6 +108,14 @@ This document captures the requirements, design decisions, and implementation ch
 - Policy: **Every new feature or fix must include tests.** No code is considered complete without test coverage. Exceptions for failing tests require explicit human approval.
 - Coverage areas: policy, rsync backend (incl. integration, progress parsing, process kill, timeout, flags/version), classifier, util (tree_fingerprint), config, apply (per-file policy, re-encode backup, held-only, stale verification, progress), prune (candidates, protected/force/permanent, reports, progress, CLI), state (stale runs, trash filtering, progress), report, cli (run, prune), gui pure helpers (library listing, cancel runs, prune action)
 
+## Versioning
+- Scheme: `x.y.z` (semantic versioning)
+- `x.y`: Set by the maintainer when tagging a stable release.
+- `z`: Can be incremented when pushing a set of commits related to a request (patch-level updates between stable releases).
+- Tooling: `setuptools-scm` with `version_scheme = "post-release"`, `local_scheme = "no-local-version"`. Version is read from git tags via `src/mediasync/__init__.py` (`importlib.metadata.version` with `setuptools_scm.get_version` fallback).
+- Tagging: Only tag `vX.Y.Z` when explicitly requested or as part of a stable release. Do not auto-create tags unless asked.
+- Bumping: If the maintainer expects a patch bump for the current request, bump `z` by tagging appropriately; otherwise leave tags as-is. Follow the maintainer's direction.
+
 ## Conventions
 - Python 3.11+, type hints
 - Dataclasses for models
