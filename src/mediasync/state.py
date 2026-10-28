@@ -419,3 +419,19 @@ class State:
         if not row:
             return None
         return dict(row)
+
+    def clear_stale_runs(self, max_age_minutes: int = 60) -> int:
+        try:
+            from datetime import datetime, timedelta
+
+            cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+        except Exception:
+            return 0
+        cur = self.conn.execute(
+            "UPDATE runs SET status='cancelled', finished=? WHERE finished IS NULL AND status IN ('running','apply','run') AND started < ?",
+            (cutoff, cutoff),
+        )
+        self.conn.commit()
+        return cur.rowcount

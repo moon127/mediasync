@@ -910,14 +910,6 @@ class MediasyncGui:
     def _preview_prune(self) -> None:
         if self.busy:
             return
-        try:
-            with State(self.config.state_dir) as state:
-                active = state.active_run_progress(self.current_library)
-                if active:
-                    messagebox.showerror("Busy", "An apply/prune is already running for this library.")
-                    return
-        except Exception:
-            pass
         library = self._library()
         policy = PolicySet.load(library.whitelist, library.blacklist)
         candidates = find_prune_candidates(self.config, library, policy)
@@ -932,6 +924,18 @@ class MediasyncGui:
     def _prune_blacklisted_confirm(self, candidates, force=False, permanent=False) -> None:
         if self.busy:
             return
+        try:
+            with State(self.config.state_dir) as state:
+                try:
+                    state.clear_stale_runs(max_age_minutes=60)
+                except Exception:
+                    pass
+                active = state.active_run_progress(self.current_library)
+                if active:
+                    messagebox.showerror("Busy", "An apply/prune is already running for this library.")
+                    return
+        except Exception:
+            pass
         protected = [c for c in candidates if c.protected]
         if protected and not force:
             messagebox.showwarning("Protected", "Some items are protected by whitelist. Use Preview and force with confirmation.")
