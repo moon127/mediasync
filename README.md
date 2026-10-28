@@ -381,3 +381,124 @@ ruff check src tests
 
 - `fast` planning uses `tree_fingerprint` (names, sizes, mtimes, types) with a SHA256 digest (`source_digest`/`target_digest`). If digests/counts differ, the cache is not treated as clean even if `max_mtime` appears unchanged (nested file changes are detected).
 - `scan_mode = "deep"` forces a full re-scan regardless of cache.
+
+## CLI Examples
+
+### Setup and configuration
+
+```sh
+# Create example config and policy files
+mediasync init --path mediasync.toml
+
+# Validate configuration
+mediasync config validate
+
+# Show effective configuration
+mediasync config show
+```
+
+### Planning and applying
+
+```sh
+# Create a plan for all enabled libraries
+mediasync plan
+
+# Create a plan for a specific library with HTML report
+mediasync plan --library TV --html
+
+# Force a deep scan (ignore cache)
+mediasync plan --deep
+
+# Approve/deny changes
+mediasync approve <plan-id> --all
+mediasync deny <plan-id> Show.Name
+
+# Apply an approved plan
+mediasync apply <plan-id>
+```
+
+### Cron-safe runs
+
+```sh
+# Plan and apply auto-approved changes; exit 10 if approval needed
+mediasync run
+
+# Apply only auto-approved/safe changes even if others need approval
+mediasync run --apply-safe
+
+# Run for a single library
+mediasync run --library Movies
+```
+
+### Policy management
+
+```sh
+# List policy rules
+mediasync policy list --library TV
+
+# Test a path against policy
+mediasync policy test --library TV --path "Show Name/Extras/clip.mkv"
+
+# Add patterns
+mediasync policy add-whitelist --library TV "Archived Show"
+mediasync policy add-blacklist --library TV "*/Extras"
+
+# Remove a pattern
+mediasync policy remove --library TV "Old Show"
+```
+
+### Trash operations
+
+```sh
+# List all trash
+mediasync trash list
+
+# List trash for a specific library
+mediasync trash list --library TV
+
+# Restore an entry
+mediasync trash restore --library TV --id 123
+
+# Purge entries older than retention days (requires --yes)
+mediasync trash purge --library TV --yes
+
+# Purge a specific entry permanently
+mediasync trash purge --library TV --id 123 --yes
+```
+
+### Prune blacklisted content
+
+```sh
+# Preview what would be pruned
+mediasync prune-blacklisted --library TV --dry-run
+
+# Prune (moves to trash by default)
+mediasync prune-blacklisted --library TV --yes
+
+# Prune permanently (dangerous)
+mediasync prune-blacklisted --library TV --yes --permanent
+```
+
+### GUI
+
+```sh
+# Launch GUI for all libraries
+mediasync gui
+
+# Launch GUI focused on a specific library
+mediasync gui --library TV
+```
+
+## Screenshots
+
+> Add screenshots to `assets/screenshots/` to populate this section. Suggested filenames:
+> `gui-main.png`, `gui-plan-review.png`, `gui-policy-tester.png`, `gui-library-browser.png`, `gui-trash.png`, `gui-prune-preview.png`
+
+| Screenshot | Description |
+| --- | --- |
+| ![Main Window](assets/screenshots/gui-main.png) | Main GUI with library selection, plan controls, and status. |
+| ![Plan Review](assets/screenshots/gui-plan-review.png) | Review changes, actions, and approve/deny individually or in bulk. |
+| ![Policy Tester](assets/screenshots/gui-policy-tester.png) | Test whitelist/blacklist rules against library-relative paths. |
+| ![Library Browser](assets/screenshots/gui-library-browser.png) | Browse top-level titles from source/target and add to whitelist/blacklist. |
+| ![Trash Window](assets/screenshots/gui-trash.png) | Trash with library filtering and multi-select restore/purge. |
+| ![Prune Preview](assets/screenshots/gui-prune-preview.png) | Preview blacklisted content before pruning to trash. |
